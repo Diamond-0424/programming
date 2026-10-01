@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ORIGIN — 幾何養殖箱</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="vendor/p5.min.js"></script>
+  <script defer src="sketch.js"></script>
+</head>
+<body>
+  <main>
+    <header><a class="brand" href="./index.html">O / ORIGIN</a><span>世界觀實驗室 &nbsp; / &nbsp; M1 · 001</span></header>
+    <section class="intro"><div><p class="eyebrow">GEOMETRIC ECOLOGY / 幾何生態層</p><h1>重啟之後，關係開始生長。</h1><p>從原點出發，點連成線，線圍成面。觀察一個尚未迎來生命的世界。</p></div><div class="edition">培養環境<br><strong>平面層 02</strong></div></section>
+    <section class="tank" aria-label="幾何養殖箱">
+      <div class="tank-heading"><span><i></i> <span id="status">環境運行中</span></span><span>ORIGIN (0, 0) / 二維觀測</span></div>
+      <div id="canvas-host"><p id="loading">正在載入幾何世界… 若持續停留，請確認 vendor/p5.min.js 存在。</p></div>
+      <div class="tank-footer"><span>點擊箱內，投入一組節點</span><span>資訊流 / 平面沉積 / 維度交會</span></div>
+    </section>
+    <p id="observation" class="observation" aria-live="off">淡網格顯示資訊密度與波動；圓點會隨流偏移，進入沉積區時減速。</p>
+    <details class="world-details">
+      <summary>認識這個世界</summary>
+      <section class="world-key" aria-label="世界區域說明">
+        <div><span>00 — ORIGIN</span><strong>原點</strong><p>中央小十字與淡環標記起點，附近節點緩慢迴旋。</p></div>
+        <div><span>01 — FLOW</span><strong>資訊流</strong><p>幾何場像風與水流般帶動節點，同時保留自己的群集運動。</p></div>
+        <div><span>02 — STRATA</span><strong>平面沉積</strong><p>網格隆起表示資訊密度，沉積區內的節點放慢移動。</p></div>
+        <div><span>03 — FIELD</span><strong>幾何波</strong><p>波動穿過網格，表現數學結構的變化；圓點仍處於二維層。</p></div>
+      </section>
+    </details>
+    <section class="dashboard" aria-label="環境控制">
+      <div class="metrics" aria-label="動態節點統計，不含固定地形"><div><span>游離點 / POINT</span><strong id="points">0</strong></div><div><span>連接 / LINK</span><strong id="lines">0</strong></div><div><span>閉合面 / FACE</span><strong id="planes">0</strong></div></div>
+      <div class="setting"><label for="connection">連接距離 <output id="distance">76</output></label><input id="connection" type="range" min="35" max="110" value="76"><small>靠近建立關係，遠離解除連接</small><label for="flow" style="margin-top:16px">資訊流強度 <output id="flow-value">70%</output></label><input id="flow" type="range" min="0" max="150" value="70" step="5"><small>0% 靜態地形 → 150% 明顯流動</small></div>
+      <div class="actions"><button id="pause" type="button">暫停</button><button id="reset" type="button">重新生成</button><button id="capture" type="button">儲存截圖 ↗</button></div>
+    </section>
+    <footer><span>● 點：資訊單位 &nbsp; ─ 線：連接關係 &nbsp; △ 面：封閉結構</span><span>截游體尚未加入 / 00 SPECIMENS</span></footer>
+  </main>
+</body>
+</html>
