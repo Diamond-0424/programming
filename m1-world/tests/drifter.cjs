@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
@@ -60,3 +61,38 @@ vm.runInContext(`
   for(const p of [0,0.2,transition,0.5,0.8,1]) {drifter.sections=sectionGeometry(p);drawDrifter();}
   console.log('PASS: 固定環體方程、臨界切片、雙圓截面、中央空隙、捕食守恆、離開與返回、暫停、重設、300 秒整合及繪圖呼叫。');
 `,ctx);
+=======
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+let seed=42;
+const context=vm.createContext({Math,console,assert,TWO_PI:Math.PI*2,
+  random(a,b){if(b===undefined){b=a;a=0;}seed=(seed*1664525+1013904223)>>>0;return a+(b-a)*seed/4294967296;}});
+vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../sketch.js'),'utf8'),context);
+vm.runInContext(`
+  const d=new SectionDrifter(),other=new SectionDrifter();
+  assert.notEqual(d.duration,other.duration);
+  assert.equal(d.sliceCount,1);assert(d.radius<=1);
+  const phases=new Set();let waits=0,reentries=0,hadSeparated=false,largest=0;
+  for(let f=0;f<24000;f++){
+    const oldPhase=d.phase,oldAnchor={...d.anchor};
+    d.update(1/60);phases.add(d.phase);largest=Math.max(largest,d.radius);
+    for(const s of d.slices){
+      assert(Number.isFinite(s.r)&&s.r>=0);
+      assert(s.x-s.r>0&&s.x+s.r<1000&&s.y-s.r>0&&s.y+s.r<460);
+    }
+    if(d.slices.length>=2){
+      const [a,b]=d.slices;
+      if(Math.hypot(a.x-b.x,a.y-b.y)>a.r+b.r)hadSeparated=true;
+    }
+    if(oldPhase!=='離開平面'&&d.phase==='離開平面'){
+      waits++;assert.equal(d.sliceCount,0);assert.equal(d.radius,0);
+      assert(d.waitRemaining>=3&&d.waitRemaining<=7);
+    }
+    if(oldPhase==='離開平面'&&d.phase!=='離開平面'){
+      reentries++;assert(Math.hypot(d.anchor.x-oldAnchor.x,d.anchor.y-oldAnchor.y)>=170);
+    }
+    const paused=JSON.stringify(d);d.update(0);assert.equal(JSON.stringify(d),paused);
+  }
+  assert(phases.size===5&&waits>=5&&reentries>=5&&hadSeparated&&largest>30);
+  console.log('PASS: independent parameters, point entry, five lifecycle stages, separated slices, canvas bounds, pause, repeated disappearance and relocation.');
+`,context);
+>>>>>>> Stashed changes

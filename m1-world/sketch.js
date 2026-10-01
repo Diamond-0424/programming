@@ -5,6 +5,7 @@ let nodes = [], running = true, elapsed = 0, connection = 76;
 let flowStrength = 0.7;
 let view = { scale: 1, x: 0, y: 0 };
 const ui = {};
+<<<<<<< Updated upstream
 const DRIFTER = { visit: 18, rest: 6, major: 38, tube: 19, fade: 0.9, samples: 128, cycle: 24 };
 let drifter;
 
@@ -229,6 +230,112 @@ function drawDrifter() {
     circle(n.x,n.y,3.6/Math.sqrt(view.scale));
   }
   pop();
+=======
+// 截游體調整入口：時間單位為秒，大小為 1000 × 460 世界座標的半徑。
+const DRIFTER = { minRadius: 48, maxRadius: 76, speed: 1,
+  durationMin: 26, durationMax: 36, maxSlices: 3,
+  spread: 1.6, drift: 14, waitMin: 3, waitMax: 7 };
+let drifter;
+
+class SectionDrifter {
+  constructor() {
+    this.position = { x: 500, y: 230 };
+    this.speed = DRIFTER.speed * random(0.9, 1.1);
+    this.lifecycle = 0;
+    this.phase = '出現';
+    this.radius = 0;
+    this.sliceCount = 0;
+    this.waitRemaining = 0;
+    this.startPassage();
+  }
+
+  startPassage() {
+    const old = this.anchor;
+    // 所有截面限制在安全邊界內；窄螢幕仍使用相同世界座標。
+    this.maxRadius = Math.min(random(DRIFTER.minRadius, DRIFTER.maxRadius), 85);
+    this.duration = random(DRIFTER.durationMin, DRIFTER.durationMax);
+    this.anchor = { x: random(220,780), y: random(170,290) };
+    if (old && Math.hypot(this.anchor.x-old.x,this.anchor.y-old.y)<170) {
+      this.anchor.x = old.x<500 ? random(610,780) : random(220,390);
+    }
+    this.position = { ...this.anchor };
+    this.seed = random(TWO_PI);
+    this.parts = [];
+    const count = Math.max(2,Math.floor(random(2,Math.max(2,DRIFTER.maxSlices)+1)));
+    const rotation = random(TWO_PI);
+    for (let i=0;i<count;i++) this.parts.push({
+      angle: rotation+i*TWO_PI/count+random(-0.25,0.25),
+      scale: random(0.52,0.76), offset: random(0.7,1),
+      start: 0.27+i*0.018, end: 0.82-i*0.015, sway: random(TWO_PI)
+    });
+    this.lifecycle = 0;
+    this.phase = '出現';
+    this.refreshSlices();
+  }
+
+  smooth(a,b,value) {
+    const u = Math.max(0,Math.min(1,(value-a)/(b-a)));
+    return u*u*(3-2*u);
+  }
+
+  update(dt) {
+    if (dt<=0) return;
+    if (this.phase==='離開平面') {
+      this.waitRemaining -= dt;
+      if (this.waitRemaining<=0) this.startPassage();
+      return;
+    }
+    this.lifecycle = Math.min(1,this.lifecycle+dt*this.speed/this.duration);
+    if (this.lifecycle>=1) {
+      this.phase='離開平面'; this.radius=0; this.slices=[]; this.sliceCount=0;
+      this.waitRemaining=random(DRIFTER.waitMin,DRIFTER.waitMax);
+      return;
+    }
+    this.refreshSlices();
+  }
+
+  refreshSlices() {
+    const t=this.lifecycle;
+    this.phase = t<0.08 ? '出現' : t<0.3 ? '擴張' : t<0.72 ? '多重截面' : '縮小';
+    this.position.x=this.anchor.x+Math.sin(t*3+this.seed)*DRIFTER.drift;
+    this.position.y=this.anchor.y+Math.sin(t*2.1+this.seed*1.7)*DRIFTER.drift*0.6;
+    // 首尾保留可辨識的小點，其餘時間連續擴張／縮小。
+    const envelope=this.smooth(0.025,0.32,t)*(1-this.smooth(0.73,0.975,t));
+    const split=this.smooth(0.30,0.48,t)*(1-this.smooth(0.64,0.82,t));
+    this.slices=[];
+    const coreRadius=(1+this.maxRadius*envelope)*(1-split);
+    if(coreRadius>0.05) this.slices.push({x:this.position.x,y:this.position.y,r:coreRadius});
+    for(const part of this.parts) {
+      const u=(t-part.start)/(part.end-part.start);
+      if(u<=0||u>=1) continue;
+      const shape=Math.sin(Math.PI*u);
+      const r=this.maxRadius*part.scale*shape*shape;
+      const offset=this.maxRadius*DRIFTER.spread*part.offset*split;
+      const angle=part.angle+Math.sin(t*2+part.sway)*0.12;
+      this.slices.push({x:this.position.x+Math.cos(angle)*offset,
+        y:this.position.y+Math.sin(angle)*offset*0.65,r});
+    }
+    this.sliceCount=this.slices.filter(s=>s.r>=0.5).length;
+    this.radius=Math.max(0,...this.slices.map(s=>s.r));
+  }
+
+  display() {
+    push();
+    for(const slice of this.slices) {
+      const opacity=Math.min(1,slice.r/3);
+      if(slice.r<1.5) {
+        noStroke(); fill(235,Math.max(0.5,opacity)*180); circle(slice.x,slice.y,2);
+      } else {
+        stroke(230,opacity*155); strokeWeight(0.85/view.scale);
+        fill(230,opacity*5); circle(slice.x,slice.y,slice.r*2);
+        // 較淡的內輪廓提供切面厚度感，避免像实心球。
+        noFill();stroke(225,opacity*28);strokeWeight(0.5/view.scale);
+        circle(slice.x,slice.y,slice.r*1.91);
+      }
+    }
+    pop();
+  }
+>>>>>>> Stashed changes
 }
 // 固定地形與動態節點分開：它們是環境，不是生物。
 const strata = [
@@ -248,6 +355,7 @@ function setup() {
   createCanvas(host.clientWidth, host.clientHeight).parent(host);
   pixelDensity(Math.min(window.devicePixelRatio || 1, 2));
   document.getElementById('loading').remove();
+<<<<<<< Updated upstream
   describe('黑白網格中的點群隨資訊流移動。截游體只顯示三維環體與二維平面的交集，細線輪廓逐漸出現、收腰、分成兩塊再接回；被包入的點淡出並離開平面。');
   for (const id of ['points', 'lines', 'planes', 'status', 'pause']) ui[id] = document.getElementById(id);
   document.getElementById('connection').addEventListener('input', event => {
@@ -258,14 +366,18 @@ function setup() {
     flowStrength = Number(event.target.value) / 100;
     document.getElementById('flow-value').value = `${event.target.value}%`;
   });
+=======
+  describe('深色二維平面中，一隻截游體的淺色截面由點擴張為圓，緩慢分開成不對稱圓群，再縮成點消失，等待後在另一處出現。');
+  for (const id of ['status', 'pause']) ui[id] = document.getElementById(id);
+>>>>>>> Stashed changes
   ui.pause.addEventListener('click', () => {
     running = !running;
     ui.pause.textContent = running ? '暫停' : '繼續';
     ui.status.textContent = running ? '環境運行中' : '觀測已暫停';
   });
-  document.getElementById('reset').addEventListener('click', resetWorld);
-  document.getElementById('capture').addEventListener('click', () => saveCanvas('m1-origin-world', 'png'));
-  resetWorld();
+  document.getElementById('reset').addEventListener('click', () => { drifter=new SectionDrifter(); });
+  document.getElementById('capture').addEventListener('click', () => saveCanvas('section-drifter', 'png'));
+  drifter=new SectionDrifter();
 }
 
 function resetWorld() {
@@ -395,6 +507,18 @@ function updateNodes(dt) {
 }
 
 function draw() {
+  background(14,16,19);
+  view.scale=Math.min((width-32)/WORLD.width,(height-32)/WORLD.height);
+  view.x=(width-WORLD.width*view.scale)/2;
+  view.y=(height-WORLD.height*view.scale)/2;
+  drifter.update(running ? Math.min(deltaTime/1000,0.05) : 0);
+  push();translate(view.x,view.y);scale(view.scale);drifter.display();pop();
+  ui.status.textContent=running ? drifter.phase : '觀測已暫停';
+  document.getElementById('observation').textContent=`${drifter.phase} · 可見截面 ${drifter.sliceCount} · 同一隻三維生物`;
+}
+
+// 舊版環境程式保留供日後整合；本版不呼叫此繪圖函式。
+function drawWorld() {
   background(255);
   const dt = running ? Math.min(deltaTime / 1000, 0.05) : 0;
   updateNodes(dt);
@@ -530,6 +654,7 @@ function drawOrigin() {
 }
 
 function mousePressed(event) {
+  if (drifter) return; // 本版互動由暫停、重新生成與截圖控制。
   if (event.target !== document.querySelector('#canvas-host canvas')) return;
   const x = (mouseX - view.x) / view.scale, y = (mouseY - view.y) / view.scale;
   if (x < 0 || x > WORLD.width || y < 0 || y > WORLD.height) return;

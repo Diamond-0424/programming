@@ -2,5 +2,9 @@
 
 .observation{font-size:11px;color:#555;min-height:32px;line-height:1.8;margin:12px 0}.world-key{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #ccc;border-bottom:1px solid #ccc;padding:20px 0;gap:24px}.world-key span{display:block;font:9px monospace;letter-spacing:1px;color:#777}.world-key strong{display:block;font-size:13px;font-weight:500;margin:10px 0}.world-key p{font-size:11px;line-height:1.8;color:#777;margin:0}@media(max-width:760px){.world-key{grid-template-columns:repeat(2,1fr);gap:18px}.observation{min-height:44px}}
 .world-details{border-bottom:1px solid #ddd;padding:0 0 12px}.world-details summary{font-size:11px;color:#666;cursor:pointer;width:fit-content}.world-details .world-key{border:0;padding-bottom:4px;margin-top:12px}
+<<<<<<< Updated upstream
 .specimen{display:flex;justify-content:space-between;gap:24px;border-top:1px solid #ccc;padding:18px 0}.specimen strong{display:block;font-size:16px;font-weight:500;margin-top:6px}.specimen p{font-size:11px;color:#666;line-height:1.8}.specimen-stats{display:flex;align-items:center;gap:24px;font-size:10px;color:#777;flex-wrap:wrap}.specimen-stats b{display:block;font-size:14px;font-weight:400;color:#222;margin-top:8px}@media(max-width:760px){.specimen{flex-direction:column;gap:0}.specimen-stats{justify-content:space-between;padding:8px 0 16px;gap:16px}}
 .slice-note{max-width:760px;font-size:11px;line-height:1.9;color:#666;margin:16px 0 4px}
+=======
+.tank,#canvas-host{background:#0e1013}.tank{border-color:#34373c}.tank-heading,.tank-footer{color:#b0b3b8;border-color:#303338}.tank-heading i{background:#d5d7da}.dashboard{display:flex;justify-content:flex-end}#loading{color:#c5c7cc}
+>>>>>>> Stashed changes
