@@ -1,10 +1,235 @@
-// 幾何環境原型：所有節點都是環境資訊，沒有生物或捕食行為。
+// 二維環境與截游體：只呈現三維生命穿越平面的截面。
 const WORLD = { width: 1000, height: 460, limit: 140 };
 const MOTION = { neighborhood: 80, spacing: 36, turnRate: 1.65, wallMargin: 65 };
 let nodes = [], running = true, elapsed = 0, connection = 76;
 let flowStrength = 0.7;
 let view = { scale: 1, x: 0, y: 0 };
 const ui = {};
+const DRIFTER = { visit: 18, rest: 6, major: 38, tube: 19, fade: 0.9, samples: 128, cycle: 24 };
+let drifter;
+
+function resetDrifter() {
+  drifter = { time: 0, cycle: -1, seed: 38661, x: 500, y: 230, angle: 0,
+    driftAngle: 0, depth: 0, visit: DRIFTER.visit,
+    shape: {type:'torus',name:'環體',major:DRIFTER.major,tube:DRIFTER.tube},extent:DRIFTER.major+DRIFTER.tube,
+    sections: [], held: [], consumed: 0, phase: '三維巡游' };
+}
+
+function drifterRandom() {
+  drifter.seed = (Math.imul(1664525,drifter.seed)+1013904223)>>>0;
+  return drifter.seed / 4294967296;
+}
+
+function chooseDrifterShape() {
+  const pick=Math.floor(drifterRandom()*4);
+  const scale=0.65+drifterRandom()*1.7;
+  if(pick===0) return {type:'sphere',name:'球體',radius:(23+drifterRandom()*19)*scale,scale};
+  if(pick===1) return {type:'ellipsoid',name:'橢球',rx:(25+drifterRandom()*20)*scale,ry:(16+drifterRandom()*13)*scale,rz:(22+drifterRandom()*16)*scale,scale};
+  if(pick===2) {
+    const major=(22+drifterRandom()*19)*scale;
+    return {type:'torus',name:'環體',major,tube:major*(0.38+drifterRandom()*0.13),scale};
+  }
+  return {type:'cube',name:'斜切立方體',half:(20+drifterRandom()*13)*scale,scale,
+    tiltX:-0.65+drifterRandom()*1.3,tiltY:-0.65+drifterRandom()*1.3};
+}
+
+function shapeDepthExtent(shape) {
+  if(shape.type==='sphere') return shape.radius;
+  if(shape.type==='ellipsoid') return shape.rz;
+  if(shape.type==='torus') return shape.major+shape.tube;
+  const {half,tiltX,tiltY}=shape;
+  return half*(Math.abs(Math.cos(tiltX)*Math.sin(tiltY))+
+    Math.abs(Math.sin(tiltX))+Math.abs(Math.cos(tiltX)*Math.cos(tiltY)));
+}
+
+function shapeScreenRadius(shape) {
+  if(shape.type==='sphere')return shape.radius;
+  if(shape.type==='ellipsoid')return Math.hypot(shape.rx,shape.ry);
+  if(shape.type==='torus')return shape.major+shape.tube;
+  return Math.sqrt(3)*shape.half;
+}
+
+function makeDrifterPath(radius) {
+  const margin=Math.min(155,radius+12);
+  const left=margin,right=WORLD.width-margin,top=margin,bottom=WORLD.height-margin;
+  const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  let start={x:500,y:230},end={x:500,y:230};
+  for(let attempt=0;attempt<60&&distance(start,end)<340;attempt++) {
+    start={x:left+drifterRandom()*(right-left),y:top+drifterRandom()*(bottom-top)};
+    end={x:left+drifterRandom()*(right-left),y:top+drifterRandom()*(bottom-top)};
+  }
+  const dx=end.x-start.x,dy=end.y-start.y,length=Math.max(1,Math.hypot(dx,dy));
+  const bend=(-0.5+drifterRandom())*Math.min(250,length*0.55);
+  const middle={x:(start.x+end.x)/2-dy/length*bend,y:(start.y+end.y)/2+dx/length*bend};
+  middle.x=Math.max(left,Math.min(right,middle.x));
+  middle.y=Math.max(top,Math.min(bottom,middle.y));
+  return {start,end,middle};
+}
+
+// 所有型態都有明確的三維本體；只有切片位置會隨時間改變。
+function sliceDepth(progress) {
+  return drifter.extent*(1-2*progress);
+}
+
+function sectionToWorld(u, v) {
+  const c = Math.cos(drifter.angle), s = Math.sin(drifter.angle);
+  return { x: drifter.x + u*c - v*s, y: drifter.y + u*s + v*c };
+}
+
+function sectionGeometry(progress) {
+  if (progress <= 0 || progress >= 1) return [];
+  const shape=drifter.shape, depth=sliceDepth(progress);
+  if(shape.type==='sphere'||shape.type==='ellipsoid') {
+    const rx=shape.type==='sphere'?shape.radius:shape.rx;
+    const ry=shape.type==='sphere'?shape.radius:shape.ry;
+    const factor=1-depth*depth/(shape.type==='sphere'?shape.radius**2:shape.rz**2);
+    if(factor<=0)return [];
+    const points=[];
+    for(let i=0;i<DRIFTER.samples;i++) {
+      const a=i*Math.PI*2/DRIFTER.samples;
+      points.push(sectionToWorld(rx*Math.sqrt(factor)*Math.cos(a),ry*Math.sqrt(factor)*Math.sin(a)));
+    }
+    return [{points}];
+  }
+  if(shape.type==='cube') {
+    const h=shape.half,cx=Math.cos(shape.tiltX),sx=Math.sin(shape.tiltX);
+    const cy=Math.cos(shape.tiltY),sy=Math.sin(shape.tiltY),vertices=[];
+    for(let i=0;i<8;i++) {
+      const x=(i&1)?h:-h,y=(i&2)?h:-h,z=(i&4)?h:-h;
+      const zY=-sy*x+cy*z;
+      vertices.push({x:cy*x+sy*z,y:cx*y-sx*zY,z:sx*y+cx*zY});
+    }
+    const points=[];
+    for(let i=0;i<8;i++) for(let j=i+1;j<8;j++) if((i^j)===1||(i^j)===2||(i^j)===4) {
+      const a=vertices[i],b=vertices[j],da=a.z-depth,db=b.z-depth;
+      if(Math.abs(da)<1e-8)points.push({x:a.x,y:a.y});
+      if(da*db<0) {
+        const t=da/(da-db);points.push({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});
+      }
+    }
+    const unique=[];
+    for(const p of points)if(!unique.some(q=>Math.hypot(p.x-q.x,p.y-q.y)<1e-7))unique.push(p);
+    if(unique.length<3)return [];
+    const center=unique.reduce((s,p)=>({x:s.x+p.x/unique.length,y:s.y+p.y/unique.length}),{x:0,y:0});
+    unique.sort((a,b)=>Math.atan2(a.y-center.y,a.x-center.x)-Math.atan2(b.y-center.y,b.x-center.x));
+    return [{points:unique.map(p=>sectionToWorld(p.x,p.y))}];
+  }
+  const R=shape.major,r=shape.tube;
+  const outer = Math.sqrt(Math.max(0, (R+r)**2-depth**2));
+  const inner = Math.sqrt(Math.max(0, (R-r)**2-depth**2));
+  const ranges = inner > 0 ? [[-outer,-inner],[inner,outer]] : [[-outer,outer]];
+  return ranges.map(([left,right]) => {
+    const points = [];
+    for (let i=0; i<DRIFTER.samples; i++) {
+      const angle = i * Math.PI * 2 / DRIFTER.samples;
+      const u = (left+right)/2 + (right-left)/2*Math.cos(angle);
+      const radial = Math.hypot(u,depth)-R;
+      const v = (i <= DRIFTER.samples/2 ? 1 : -1) * Math.sqrt(Math.max(0,r*r-radial*radial));
+      points.push(sectionToWorld(u,v));
+    }
+    return { points };
+  });
+}
+
+function insideSections(point) {
+  if (!drifter.sections.length) return false;
+  const dx=point.x-drifter.x, dy=point.y-drifter.y;
+  const c=Math.cos(drifter.angle), s=Math.sin(drifter.angle);
+  const u=dx*c+dy*s, v=-dx*s+dy*c;
+  const shape=drifter.shape;
+  if(shape.type==='sphere')return u*u+v*v+drifter.depth**2<=shape.radius**2;
+  if(shape.type==='ellipsoid')return u*u/shape.rx**2+v*v/shape.ry**2+drifter.depth**2/shape.rz**2<=1;
+  if(shape.type==='cube')return drifter.sections.some(section=>pointInPolygon(point,section.points));
+  // 使用三維環體方程判斷，兩塊截面中間的空隙不捕食。
+  return (Math.hypot(u,drifter.depth)-shape.major)**2+v*v <= shape.tube**2;
+}
+
+function pointInPolygon(point,points) {
+  let inside=false;
+  for(let i=0,j=points.length-1;i<points.length;j=i++) {
+    const a=points[i],b=points[j];
+    if((a.y>point.y)!==(b.y>point.y)&&point.x<(b.x-a.x)*(point.y-a.y)/(b.y-a.y)+a.x)inside=!inside;
+  }
+  return inside;
+}
+
+function updateDrifter(dt) {
+  if (dt <= 0) return;
+  drifter.time += dt;
+  const cycle=Math.floor(drifter.time/DRIFTER.cycle);
+  const local=drifter.time%DRIFTER.cycle;
+  drifter.held = drifter.held.filter(n => {
+    n.age += dt;
+    if (n.age < DRIFTER.fade) return true;
+    drifter.consumed++;
+    return false;
+  });
+  if (cycle !== drifter.cycle) {
+    drifter.shape=chooseDrifterShape();
+    drifter.extent=shapeDepthExtent(drifter.shape);
+    drifter.visit=12+drifterRandom()*7;
+    drifter.path=makeDrifterPath(shapeScreenRadius(drifter.shape));
+    drifter.baseAngle=drifterRandom()*Math.PI*2;
+    drifter.angle=drifter.baseAngle;
+    drifter.spin=(-0.5+drifterRandom())*1.2;
+    drifter.cycle = cycle;
+  }
+  const progress = Math.min(1,local/drifter.visit);
+  const path=drifter.path;
+  const inverse=1-progress;
+  drifter.x=inverse*inverse*path.start.x+2*inverse*progress*path.middle.x+progress*progress*path.end.x;
+  drifter.y=inverse*inverse*path.start.y+2*inverse*progress*path.middle.y+progress*progress*path.end.y;
+  drifter.angle=drifter.baseAngle+drifter.spin*Math.sin(Math.PI*progress);
+  drifter.depth = sliceDepth(progress);
+  drifter.sections = sectionGeometry(progress);
+  if (local >= drifter.visit) {
+    drifter.consumed += drifter.held.length;
+    drifter.held = [];
+    drifter.phase = '三維巡游';
+    return;
+  }
+  if(drifter.shape.type==='torus') {
+    const neck=Math.abs(Math.abs(drifter.depth)-(drifter.shape.major-drifter.shape.tube));
+    drifter.phase=drifter.sections.length===2?'同體・雙截面':neck<5?'頸部交會':progress<0.5?'進入平面':'離開平面';
+  } else {
+    drifter.phase=drifter.sections.length?`${drifter.shape.name}・${progress<0.5?'進入':'離開'}平面`:'穿越中';
+  }
+  // 捕食是世界觀設定：點在被包入的位置淡出，表示被帶離二維層。
+  // 不把點綁到任意圓心，避免截面分裂時瞬移。
+  nodes = nodes.filter(n => {
+    if (!insideSections(n)) return true;
+    drifter.held.push({ x: n.x, y: n.y, age: 0 });
+    return false;
+  });
+}
+
+function drawDrifter() {
+  push();
+  for (const section of drifter.sections) {
+    // 沿用環境的薄線與節點語彙，只有當下切面，不畫本體投影或假殘影。
+    fill(0, 4); stroke(0, 95); strokeWeight(0.75/view.scale);
+    beginShape();
+    for (const p of section.points) vertex(p.x,p.y);
+    endShape(CLOSE);
+    noStroke(); fill(0, 120);
+    let distance = 0;
+    for (let i=1; i<section.points.length; i++) {
+      const a=section.points[i-1], b=section.points[i];
+      distance += Math.hypot(b.x-a.x,b.y-a.y);
+      if (distance >= 16) {
+        circle(b.x,b.y,1.8/Math.sqrt(view.scale));
+        distance %= 16;
+      }
+    }
+  }
+  noStroke();
+  for (const n of drifter.held) {
+    const alpha = Math.max(0,1-n.age/DRIFTER.fade);
+    fill(20,220*alpha);
+    circle(n.x,n.y,3.6/Math.sqrt(view.scale));
+  }
+  pop();
+}
 // 固定地形與動態節點分開：它們是環境，不是生物。
 const strata = [
   { x: 210, y: 145, r: 94, sides: 6, angle: -0.25 },
@@ -23,7 +248,7 @@ function setup() {
   createCanvas(host.clientWidth, host.clientHeight).parent(host);
   pixelDensity(Math.min(window.devicePixelRatio || 1, 2));
   document.getElementById('loading').remove();
-  describe('黑白數位地形由淡色起伏網格構成，資訊波緩慢通過地形，深色圓點在場中群集、漫步並隨流轉向。');
+  describe('黑白網格中的點群隨資訊流移動。截游體只顯示三維環體與二維平面的交集，細線輪廓逐漸出現、收腰、分成兩塊再接回；被包入的點淡出並離開平面。');
   for (const id of ['points', 'lines', 'planes', 'status', 'pause']) ui[id] = document.getElementById(id);
   document.getElementById('connection').addEventListener('input', event => {
     connection = Number(event.target.value);
@@ -47,13 +272,14 @@ function resetWorld() {
   randomSeed(42); // 固定初始配置，方便比較參數的差異。
   nodes = [];
   elapsed = 0;
+  resetDrifter();
   for (let i = 0; i < 82; i++) {
     addNode();
   }
 }
 
 function addNode(x = random(12, WORLD.width-12), y = random(12, WORLD.height-12)) {
-  if (nodes.length >= WORLD.limit) return;
+  if (nodes.length + (drifter ? drifter.held.length : 0) >= WORLD.limit) return;
   const angle = random(TWO_PI), speed = random(18, 30);
   nodes.push({ x, y, vx: cos(angle) * speed, vy: sin(angle) * speed,
     heading: angle, speed, wander: 0, wanderTarget: random(-1.4, 1.4), wanderTimer: random(0.5, 2),
@@ -172,6 +398,7 @@ function draw() {
   background(255);
   const dt = running ? Math.min(deltaTime / 1000, 0.05) : 0;
   updateNodes(dt);
+  updateDrifter(dt);
   view.scale = Math.min((width - 44) / WORLD.width, (height - 44) / WORLD.height);
   view.x = (width - WORLD.width * view.scale) / 2;
   view.y = (height - WORLD.height * view.scale) / 2;
@@ -190,7 +417,7 @@ function draw() {
       }
     }
   }
-  // 三條連線都存在時才畫面；沒有任何升維或生命邏輯。
+  // 只有自由節點建立連線與面；被包入的點由截游體繪製。
   let planes = 0;
   noStroke(); fill(0, 10);
   for (const [i, j] of edges) {
@@ -215,13 +442,20 @@ function draw() {
     line(n.x-Math.cos(n.heading)*7,n.y-Math.sin(n.heading)*7,n.x,n.y);
     noStroke(); fill(20); circle(n.x,n.y,3.6/Math.sqrt(view.scale));
   }
+  drawDrifter();
   pop();
+  document.getElementById('drifter-phase').textContent = drifter.phase;
+  document.getElementById('drifter-type').textContent = drifter.shape ? drifter.shape.name : '等待穿越';
+  document.getElementById('held').textContent = drifter.held.length;
+  document.getElementById('consumed').textContent = drifter.consumed;
   ui.points.textContent = String(nodes.length).padStart(3, '0');
   ui.lines.textContent = String(edges.length).padStart(3, '0');
   ui.planes.textContent = String(planes).padStart(3, '0');
   const mx = (mouseX-view.x)/view.scale, my = (mouseY-view.y)/view.scale;
   const region = regions.find(r => Math.hypot(mx-r.x, my-r.y) < r.r);
-  document.getElementById('observation').textContent = region
+  document.getElementById('observation').textContent = insideSections({x:mx,y:my})
+    ? '截游體 / SECTION DRIFTER — 你看到的是同一隻三維生命的截面；兩個輪廓不代表兩隻生物。包入的點會隨牠離開平面。'
+    : region
     ? `${region.title} — ${region.detail}`
     : '淡網格顯示資訊密度與波動；圓點會隨流偏移，進入沉積區時減速。';
 }
