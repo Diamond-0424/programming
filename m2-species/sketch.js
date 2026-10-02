@@ -495,19 +495,48 @@ class SectionDrifter {
       }
     }
 
-    // 繪製正在被「帶離平面、抽離至三維空間」的節點（原地淡出 + 幾何漣漪）
-    noStroke();
+    // 繪製正在被「帶離平面、抽離至三維空間」的節點（方案 B：升維拓樸撕裂晶格 + 多邊形幾何諧波）
     for (const n of this.held) {
-      const alpha = Math.max(0, 1 - n.age / this.fadeDuration);
-      fill(20, 220 * alpha);
-      circle(n.x, n.y, (3.6 / Math.sqrt(scale)) * (1 + (1 - alpha) * 0.8));
+      const p = Math.min(1, Math.max(0, n.age / this.fadeDuration)); // 0 ~ 1 抽離進度
+      const alpha = Math.max(0, 1 - p);
+      const invScale = 1 / Math.sqrt(scale);
 
-      // 淡出時產生的微弱維度漣漪
-      stroke(0, 50 * alpha);
-      strokeWeight(0.6 / scale);
-      noFill();
-      circle(n.x, n.y, (14 * (1 - alpha)) / Math.sqrt(scale));
+      // 1. 核心節點：由實心點逐漸轉化並淡出
       noStroke();
+      fill(20, 210 * alpha);
+      circle(n.x, n.y, 3.6 * invScale * (1 - p * 0.35));
+
+      // 2. 擴散的六邊形幾何拓樸撕裂晶格（Polygonal Rift）
+      const riftRadius = 20 * Math.sqrt(p) * invScale;
+      const riftAngle = p * 0.8;
+      stroke(0, 65 * alpha);
+      strokeWeight(0.55 / scale);
+      noFill();
+      beginShape();
+      for (let s = 0; s < 6; s++) {
+        const a = riftAngle + (s * Math.PI) / 3;
+        vertex(n.x + Math.cos(a) * riftRadius, n.y + Math.sin(a) * riftRadius);
+      }
+      endShape(CLOSE);
+
+      // 3. 晶格頂點的微小幾何游離點（象徵低維拓樸結構解離）
+      noStroke();
+      fill(0, 110 * alpha);
+      for (let s = 0; s < 6; s++) {
+        const a = riftAngle + (s * Math.PI) / 3;
+        circle(n.x + Math.cos(a) * riftRadius, n.y + Math.sin(a) * riftRadius, 1.3 * invScale);
+      }
+
+      // 4. 四向升維投影十字針（Isometric Dimension Extraction Ticks）
+      // 象徵節點正被垂直拉升至三維空間，在二維平面投影上留下的坐標痕跡
+      stroke(0, 45 * alpha);
+      strokeWeight(0.5 / scale);
+      const innerD = (4 + 6 * p) * invScale;
+      const outerD = (innerD + 7 * (1 - p * 0.5)) * invScale;
+      line(n.x + innerD, n.y, n.x + outerD, n.y);
+      line(n.x - innerD, n.y, n.x - outerD, n.y);
+      line(n.x, n.y + innerD, n.x, n.y + outerD);
+      line(n.x, n.y - innerD, n.x, n.y - outerD);
     }
 
     pop();

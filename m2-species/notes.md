@@ -62,6 +62,7 @@ $$(\sqrt{u^2 + z^2} - R)^2 + v^2 \le r^2$$
 | **經典雷諾茲預測 Pursuit / Evade** | 計算目標未來預測點並轉向截擊；獵物預測掠食者未來點反向逃離。 | 智慧感最強，但截游體為三維巨物，靈敏轉彎易破壞高維沉重巡游的威嚴感。 | [Craig Reynolds: Steering Behaviors](http://www.red3d.com/cwr/steer/) / [Nature of Code Ch.6](https://natureofcode.com/autonomous-agents/) |
 | **感應警戒逃跑 + 獵物質心追捕 [採用]** | 1. **逃跑**：警戒半徑 75px 內計算背離截面中心的 Flee 力，航速爆發提升 1.6 倍。<br>2. **追捕**：穿越貝茲路徑與切面中心向二維節點群「質心（Center of Mass）」微偏 40%，維持平滑宏觀巡游感。 | 最符合自然界巨型掠食者（如鬚鯨）與魚群之互動，視覺張力強且完全保持畫面簡潔優雅。 | [Craig Reynolds: Boids Flocking](https://www.red3d.com/cwr/boids/) |
 | **高維雙截面夾擊（Pincer Effect）[採用]** | 環體分裂為雙截面時，兩側截面同時施加背離推力，中間節點順著狹縫合力逃脫，伴隨微弱幾何資訊共振。 | 完美呼應世界觀「同一個三維生物在二維看起來像兩側夾擊的包抄圍捕」，幾何意義深刻。 | [Spiric Section](https://mathworld.wolfram.com/SpiricSection.html) |
+| **升維拓樸撕裂晶格（方案 B 特效）[採用]** | 被吃掉節點在原地升維時，產生動態擴散的旋轉六邊形諧波、6 個頂點拓樸游離點與四向軸線投影十字針。 | 嚴格維持黑白高對比幾何美學，具體詮釋低維資訊被拉升至 Z 軸時的維度撕裂。 | [Casey Reas: Software Structures](https://art-science.hexagram.ca/softwarestructures/) / [Nature of Code: Oscillation](https://natureofcode.com/oscillation/) |
 
 ---
 
