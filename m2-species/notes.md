@@ -53,6 +53,16 @@ $$(\sqrt{u^2 + z^2} - R)^2 + v^2 \le r^2$$
 - 當 $\text{depth} = 0$：恰為兩個相距 $2R$、半徑為 $r$ 的圓。
 - **中央空洞判定**：當 $(u, v) = (0, 0)$ 且 $\text{depth} = 0$ 時，方程式左邊為 $(0 - R)^2 + 0 = R^2 > r^2$，判定不在生物體內，因此環體中央空隙絕不會誤吃二維節點，完全符合真實幾何拓樸！
 
+### 雷諾茲轉向行為：追捕（Pursuit）與逃跑（Evasion）研究先行
+
+做新機制前，參考自律個體領域經典開源研究（Craig Reynolds, 1999）：
+
+| 機制方案 | 運作原理 | 取捨與評估 | 參考出處 |
+| --- | --- | --- | --- |
+| **經典雷諾茲預測 Pursuit / Evade** | 計算目標未來預測點並轉向截擊；獵物預測掠食者未來點反向逃離。 | 智慧感最強，但截游體為三維巨物，靈敏轉彎易破壞高維沉重巡游的威嚴感。 | [Craig Reynolds: Steering Behaviors](http://www.red3d.com/cwr/steer/) / [Nature of Code Ch.6](https://natureofcode.com/autonomous-agents/) |
+| **感應警戒逃跑 + 獵物質心追捕 [採用]** | 1. **逃跑**：警戒半徑 75px 內計算背離截面中心的 Flee 力，航速爆發提升 1.6 倍。<br>2. **追捕**：穿越貝茲路徑與切面中心向二維節點群「質心（Center of Mass）」微偏 40%，維持平滑宏觀巡游感。 | 最符合自然界巨型掠食者（如鬚鯨）與魚群之互動，視覺張力強且完全保持畫面簡潔優雅。 | [Craig Reynolds: Boids Flocking](https://www.red3d.com/cwr/boids/) |
+| **高維雙截面夾擊（Pincer Effect）[採用]** | 環體分裂為雙截面時，兩側截面同時施加背離推力，中間節點順著狹縫合力逃脫，伴隨微弱幾何資訊共振。 | 完美呼應世界觀「同一個三維生物在二維看起來像兩側夾擊的包抄圍捕」，幾何意義深刻。 | [Spiric Section](https://mathworld.wolfram.com/SpiricSection.html) |
+
 ---
 
 ## 四、物件導向（OOP）架構解析
@@ -71,12 +81,16 @@ classDiagram
         +Boolean isCruising
         +Array held
         +Number consumed
+        +Number pursuitOffsetX
+        +Number pursuitOffsetY
         +Object shape
         +Array sections
         +startPassage()
         +chooseShape()
+        +generatePath(radius, preyCentroid)
         +computeSections(progress)
         +insideSections(point)
+        +getEvasionForce(point)
         +update(dt)
         +display(scale)
         +getStats()
@@ -88,10 +102,12 @@ classDiagram
   - `this.progress`：0 到 1 的生命週期進程。
   - `this.shape`：三維本體形態（環體、球體、橢球、立方體）。
   - `this.sections`：二維平面上即時計算出的切面頂點列表。
+  - `this.pursuitOffsetX` / `this.pursuitOffsetY`：追捕時向二維獵物密集區微偏的動態偏移量。
   - `this.held` / `this.consumed`：捕食管理系統。
 - **方法（Methods，生物行為）**：
-  - `startPassage()`：開始新一輪穿越，規劃平滑貝茲路徑。
-  - `update(dt)`：推進時間、解出當前截面，並對二維世界進行捕食偵測。
+  - `startPassage()`：開始新一輪穿越，規劃向獵物質心牽引的平滑貝茲路徑（追捕）。
+  - `getEvasionForce(point)`：給定二維節點坐標，回傳其面臨截面迫近時的雷諾茲逃跑向量 `{ fx, fy }` 與恐慌度 `panicLevel`。
+  - `update(dt)`：推進時間、解出當前截面、施加微動態追捕，並對二維世界進行捕食偵測。
   - `display(scale)`：在畫布上渲染高維截面細線輪廓、邊界採樣點與節點淡出效果。
   - `insideSections(point)`：以三維解析幾何判定節點是否落入生物體內。
 
@@ -104,4 +120,6 @@ classDiagram
    - 環體切面分裂（centerSections = 2）驗證通過。
    - 中央空洞不捕食（`!insideSections(center)`）驗證通過。
    - 捕食與節點淡出守恆（nodes → held → consumed）驗證通過。
+   - 警戒逃跑力學（近距產生背離向量，遠距恐慌值為 0）驗證通過。
+   - 雙截面夾擊合力逃生（水平力相互抵消，垂直力沿狹縫逃脫）驗證通過。
    - 6,000 幀長時無窮迴圈穩定性（無 NaN、無出界）驗證通過。

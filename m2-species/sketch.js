@@ -56,6 +56,8 @@ class SectionDrifter {
     this.held = [];             // 正在被包入並抽離二維層的節點 [{x, y, age}]
     this.consumed = 0;          // 累計帶離平面的二維節點數
     this.fadeDuration = 0.9;    // 節點原地淡出被帶走的時間（秒）
+    this.pursuitOffsetX = 0;    // 追捕動態牽引偏移 X
+    this.pursuitOffsetY = 0;    // 追捕動態牽引偏移 Y
 
     // 幾何形體與取樣
     this.samples = 128;         // 截面輪廓的取樣點數
@@ -77,12 +79,21 @@ class SectionDrifter {
     this.duration = random(16, 24);    // 每次穿越二維平面耗時 16~24 秒
     this.restDuration = random(4, 7);  // 穿越結束後在三維空間巡游 4~7 秒
 
-    // 隨機生成一條穿越畫布的平滑二次貝茲曲線路徑
-    this.path = this.generatePath(this.calcScreenRadius(this.shape));
+    // 追捕機制：感應二維平面上節點群的質心（Center of Mass）
+    let preyCentroid = null;
+    if (typeof nodes !== 'undefined' && nodes.length > 0) {
+      const sum = nodes.reduce((acc, n) => ({ x: acc.x + n.x, y: acc.y + n.y }), { x: 0, y: 0 });
+      preyCentroid = { x: sum.x / nodes.length, y: sum.y / nodes.length };
+    }
+
+    // 隨機生成平滑二次貝茲曲線路徑，並向獵物密集區微幅牽引（追捕機制）
+    this.path = this.generatePath(this.calcScreenRadius(this.shape), preyCentroid);
     this.baseAngle = random(TWO_PI);
     this.angle = this.baseAngle;
     this.spin = random(-0.5, 0.5);
     this.held = [];
+    this.pursuitOffsetX = 0;
+    this.pursuitOffsetY = 0;
     this.phase = '截面進入';
   }
 
@@ -140,8 +151,8 @@ class SectionDrifter {
     return Math.sqrt(3) * shape.half;
   }
 
-  // 隨機產生平滑穿越路徑，確保起迄點跨度與邊界安全
-  generatePath(radius) {
+  // 產生平滑穿越路徑，可接收獵物群集質心進行路徑追捕偏轉
+  generatePath(radius, preyCentroid = null) {
     const margin = Math.min(140, Math.max(70, radius + 20));
     const left = margin, right = WORLD.width - margin;
     const top = margin, bottom = WORLD.height - margin;
@@ -155,9 +166,19 @@ class SectionDrifter {
     const dx = end.x - start.x, dy = end.y - start.y;
     const len = Math.max(1, Math.hypot(dx, dy));
     const bend = random(-0.35, 0.35) * Math.min(220, len * 0.5);
+    let midX = (start.x + end.x) / 2 - (dy / len) * bend;
+    let midY = (start.y + end.y) / 2 + (dx / len) * bend;
+
+    // 追捕偏向（Pursuit Bias）：若有獵物群集質心，將穿越路徑中點向獵物密集區牽引
+    if (preyCentroid) {
+      const bias = 0.4; // 40% 柔和牽引偏向，維持平滑宏觀巡游感
+      midX = midX * (1 - bias) + preyCentroid.x * bias;
+      midY = midY * (1 - bias) + preyCentroid.y * bias;
+    }
+
     const middle = {
-      x: Math.max(left, Math.min(right, (start.x + end.x) / 2 - (dy / len) * bend)),
-      y: Math.max(top, Math.min(bottom, (start.y + end.y) / 2 + (dx / len) * bend))
+      x: Math.max(left, Math.min(right, midX)),
+      y: Math.max(top, Math.min(bottom, midY))
     };
     return { start, middle, end };
   }
@@ -300,6 +321,50 @@ class SectionDrifter {
     return inside;
   }
 
+  // 逃跑機制：計算節點感應截面時的逃跑向量與恐慌程度（雷諾茲 Evasion + 雙截面夾擊）
+  getEvasionForce(point) {
+    if (this.isCruising || this.sections.length === 0) {
+      return { fx: 0, fy: 0, panicLevel: 0 };
+    }
+
+    const panicRadius = 75; // 警戒感應半徑（像素）
+    let totalFx = 0;
+    let totalFy = 0;
+    let maxPanic = 0;
+
+    for (const sec of this.sections) {
+      const pts = sec.points;
+      if (!pts || pts.length === 0) continue;
+
+      // 計算該截面的二維質心
+      let cx = 0, cy = 0;
+      for (let i = 0; i < pts.length; i++) {
+        cx += pts[i].x;
+        cy += pts[i].y;
+      }
+      cx /= pts.length;
+      cy /= pts.length;
+
+      const dx = point.x - cx;
+      const dy = point.y - cy;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist < panicRadius && dist > 0.001) {
+        // 逃逸強度隨距離反比增加
+        const panic = 1 - dist / panicRadius;
+        if (panic > maxPanic) maxPanic = panic;
+
+        // 雷諾茲轉向行為：反向推力（背離截面中心）
+        // 雙截面存在時，兩邊中心各自施力，自然形成狹縫夾擊逃脫效果
+        const force = panic * 3.8;
+        totalFx += (dx / dist) * force;
+        totalFy += (dy / dist) * force;
+      }
+    }
+
+    return { fx: totalFx, fy: totalFy, panicLevel: maxPanic };
+  }
+
   // 每幀更新生命週期、位置、切面與捕食
   update(dt) {
     if (dt <= 0) return;
@@ -336,11 +401,37 @@ class SectionDrifter {
       return;
     }
 
-    // 5. 計算平面投影軌跡（二次貝茲曲線）
+    // 5. 計算平面投影軌跡（二次貝茲曲線 + 微幅追捕偏轉）
     const t = this.progress;
     const inv = 1 - t;
-    this.x = inv * inv * this.path.start.x + 2 * inv * t * this.path.middle.x + t * t * this.path.end.x;
-    this.y = inv * inv * this.path.start.y + 2 * inv * t * this.path.middle.y + t * t * this.path.end.y;
+    let bx = inv * inv * this.path.start.x + 2 * inv * t * this.path.middle.x + t * t * this.path.end.x;
+    let by = inv * inv * this.path.start.y + 2 * inv * t * this.path.middle.y + t * t * this.path.end.y;
+
+    // 動態追捕微偏轉（Pursuit Steering）：感應二維平面上 140px 內的游離節點群，微幅牽引本體
+    if (typeof nodes !== 'undefined' && nodes.length > 0) {
+      let closeX = 0, closeY = 0, closeCount = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
+        const d = Math.hypot(n.x - bx, n.y - by);
+        if (d < 140 && d > 0.001) {
+          closeX += (n.x - bx);
+          closeY += (n.y - by);
+          closeCount++;
+        }
+      }
+      if (closeCount > 0) {
+        const targetOffsetX = (closeX / closeCount) * 0.12;
+        const targetOffsetY = (closeY / closeCount) * 0.12;
+        this.pursuitOffsetX += (targetOffsetX - this.pursuitOffsetX) * (2.5 * dt);
+        this.pursuitOffsetY += (targetOffsetY - this.pursuitOffsetY) * (2.5 * dt);
+      } else {
+        this.pursuitOffsetX *= Math.max(0, 1 - 2 * dt);
+        this.pursuitOffsetY *= Math.max(0, 1 - 2 * dt);
+      }
+    }
+
+    this.x = bx + this.pursuitOffsetX;
+    this.y = by + this.pursuitOffsetY;
     this.angle = this.baseAngle + this.spin * Math.sin(Math.PI * t);
     this.z = this.getDepth(t);
 
@@ -575,10 +666,17 @@ function updateNodes(dt) {
     const crowding = Math.min(1, Math.hypot(sx, sy));
     const gathering = count ? Math.min(1, Math.hypot(cx / count, cy / count) / 45) : 0;
 
+    // 取得截游體施加的逃跑力與恐慌程度（雷諾茲轉向：Evasion）
+    const evasion = drifter ? drifter.getEvasionForce(here) : { fx: 0, fy: 0, panicLevel: 0 };
+    n.panic = evasion.panicLevel;
+
     const density = Math.min(1, closeCount / 8);
-    const cohesionWeight = 0.85 * (1 - density * 0.85);
-    const alignmentWeight = 0.65 * (1 - density * 0.4);
+    // 遭遇截游體迫近時，逃跑力壓過群聚凝聚與隊形對齊，個體驚慌四散
+    const suppress = 1 - evasion.panicLevel * 0.75;
+    const cohesionWeight = 0.85 * (1 - density * 0.85) * suppress;
+    const alignmentWeight = 0.65 * (1 - density * 0.4) * suppress;
     const separationWeight = 3.2 + density * 2.2;
+    const fleeWeight = evasion.panicLevel * 7.5;
 
     n.speedTimer -= dt;
     if (n.speedTimer <= 0) {
@@ -587,8 +685,10 @@ function updateNodes(dt) {
     }
     const neighborSpeed = count ? Math.hypot(ax / count, ay / count) : n.speedTarget;
     const desiredSpeed = n.speedTarget * 0.8 + neighborSpeed * 0.2;
-    const acceleration = Math.max(-8 * dt, Math.min(8 * dt, desiredSpeed - n.speed));
-    n.speed = Math.max(10, Math.min(46, n.speed + acceleration));
+    // 恐慌加速衝刺：越靠近截面，航速爆發提升達 1.6 倍
+    const targetSpeed = desiredSpeed * (1 + evasion.panicLevel * 0.6);
+    const acceleration = Math.max(-10 * dt, Math.min(14 * dt, targetSpeed - n.speed));
+    n.speed = Math.max(10, Math.min(52, n.speed + acceleration));
 
     n.wanderTimer -= dt;
     if (n.wanderTimer <= 0) {
@@ -602,16 +702,18 @@ function updateNodes(dt) {
     const wallY = Math.max(0, (margin - n.y) / margin) - Math.max(0, (n.y - WORLD.height + margin) / margin);
     const current = sampleField(n.x, n.y, elapsed);
 
-    const targetX = Math.cos(wanderAngle) * 0.85 + cohesion.x * gathering * cohesionWeight
+    const targetX = Math.cos(wanderAngle) * 0.85 * suppress + cohesion.x * gathering * cohesionWeight
       + alignment.x * alignmentWeight + separation.x * crowding * separationWeight + wallX * 5 + spreadX
-      + current.x * flowStrength * 0.55;
-    const targetY = Math.sin(wanderAngle) * 0.85 + cohesion.y * gathering * cohesionWeight
+      + current.x * flowStrength * 0.55 * suppress + evasion.fx * fleeWeight;
+    const targetY = Math.sin(wanderAngle) * 0.85 * suppress + cohesion.y * gathering * cohesionWeight
       + alignment.y * alignmentWeight + separation.y * crowding * separationWeight + wallY * 5 + spreadY
-      + current.y * flowStrength * 0.55;
+      + current.y * flowStrength * 0.55 * suppress + evasion.fy * fleeWeight;
 
     const targetAngle = Math.hypot(targetX, targetY) > 0.00001 ? Math.atan2(targetY, targetX) : n.heading;
     const difference = Math.atan2(Math.sin(targetAngle - n.heading), Math.cos(targetAngle - n.heading));
-    n.heading += Math.max(-MOTION.turnRate * dt, Math.min(MOTION.turnRate * dt, difference));
+    // 逃跑時轉向反應敏捷度提升
+    const turnRate = MOTION.turnRate * (1 + evasion.panicLevel * 1.6);
+    n.heading += Math.max(-turnRate * dt, Math.min(turnRate * dt, difference));
     n.heading = Math.atan2(Math.sin(n.heading), Math.cos(n.heading));
     n.vx = Math.cos(n.heading) * n.speed;
     n.vy = Math.sin(n.heading) * n.speed;
@@ -782,12 +884,20 @@ function draw() {
 
   // 繪製二維節點
   for (const n of nodes) {
-    stroke(0, 70);
+    const panic = n.panic || 0;
+    // 方案 C 微效果：恐慌逃跑時極微幅高頻震顫（世界觀：幾何資訊波受高維引力共振，極微幅且簡潔）
+    const jitter = panic > 0.25 ? Math.sin(elapsed * 50 + n.x * 2) * 0.75 * panic : 0;
+    const px = n.x + jitter;
+    const py = n.y + jitter;
+
+    // 速度指標線（逃跑時速度增加，尾巴稍微拉長，保持黑白簡約）
+    const tailLen = 7 + panic * 4;
+    stroke(0, 70 + panic * 45);
     strokeWeight(0.8 / view.scale);
-    line(n.x - Math.cos(n.heading) * 7, n.y - Math.sin(n.heading) * 7, n.x, n.y);
+    line(px - Math.cos(n.heading) * tailLen, py - Math.sin(n.heading) * tailLen, px, py);
     noStroke();
     fill(20);
-    circle(n.x, n.y, 3.6 / Math.sqrt(view.scale));
+    circle(px, py, 3.6 / Math.sqrt(view.scale));
   }
 
   // 3. 繪製三維物種截游體（二維截面輪廓與被捕食淡出點）
@@ -824,7 +934,8 @@ function draw() {
     } else if (region) {
       ui.observation.textContent = `${region.title} — ${region.detail}`;
     } else if (drifter && !drifter.isCruising) {
-      ui.observation.textContent = `截游體正在穿越平面：【${drifter.phase}】· 可見截面：${drifter.sections.length} 個 · 本體三維深度 z ≈ ${drifter.z.toFixed(1)}`;
+      const fleeingCount = nodes.filter(n => (n.panic || 0) > 0.2).length;
+      ui.observation.textContent = `截游體正在穿越平面：【${drifter.phase}】· 可見截面：${drifter.sections.length} 個 · 警戒逃逸：${fleeingCount} 顆 · 本體深度 z ≈ ${drifter.z.toFixed(1)}`;
     } else {
       ui.observation.textContent = '淡網格顯示資訊密度與波動；截游體巡游於三維空間中，等待下一次週期性穿越。';
     }

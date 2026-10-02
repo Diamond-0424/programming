@@ -147,7 +147,41 @@ vm.runInContext(`
   assert.equal(drifter.held.length, 0, '淡出完成後 held 應清空');
   assert.equal(drifter.consumed, 1, '淡出完成後 consumed 應增加 1');
 
-  // 5. 驗證長時間運行與多輪穿越穩定性（模擬 6000 幀，約 100 秒）
+  // 5. 驗證追捕（Pursuit）與逃跑（Evasion）轉向力學
+  drifter.shape = { type: 'sphere', name: '球體 (Sphere)', radius: 30, scale: 1 };
+  drifter.extent = 30;
+  drifter.x = 500;
+  drifter.y = 230;
+  drifter.sections = drifter.computeSections(0.5); // 圓心在 (500, 230)
+  
+  // (a) 警戒半徑內應產生逃跑力與恐慌值
+  const nearEvasion = drifter.getEvasionForce({ x: 540, y: 230 });
+  assert(nearEvasion.panicLevel > 0, '警戒半徑 75px 內應產生恐慌值');
+  assert(nearEvasion.fx > 0, '逃跑向量 X 應向右背離截面中心');
+  assert(Math.abs(nearEvasion.fy) < 1e-4, '水平線上逃跑向量 Y 分量應近乎為 0');
+
+  // (b) 警戒半徑外恐慌值為 0，無逃跑力
+  const farEvasion = drifter.getEvasionForce({ x: 100, y: 100 });
+  assert.equal(farEvasion.panicLevel, 0, '遠離截面時恐慌值應為 0');
+  assert.equal(farEvasion.fx, 0, '遠離截面時無逃跑力 X');
+  assert.equal(farEvasion.fy, 0, '遠離截面時無逃跑力 Y');
+
+  // (c) 雙截面夾擊（Pincer Effect）：環體雙截面中心為 (460, 230) 與 (540, 230)
+  drifter.shape = { type: 'torus', name: '環體 (Torus)', major: 40, tube: 20, scale: 1 };
+  drifter.extent = 60;
+  drifter.angle = 0;
+  drifter.spin = 0;
+  drifter.x = 500;
+  drifter.y = 230;
+  drifter.sections = drifter.computeSections(0.5); // 分裂為雙截面
+  assert.equal(drifter.sections.length, 2, '中心切片應為雙截面');
+  // 測試落入雙截面中間偏下方的節點 (500, 240)
+  const pincerEvasion = drifter.getEvasionForce({ x: 500, y: 240 });
+  assert(pincerEvasion.panicLevel > 0, '夾擊狹縫中的節點應感受到恐慌');
+  assert(pincerEvasion.fy > 0, '左右兩側截面同時推擠，節點應順著夾縫向下逃逸 (fy > 0)');
+  assert(Math.abs(pincerEvasion.fx) < 1e-4, '雙截面對稱位置上水平逃跑力應相互抵消');
+
+  // 6. 驗證長時間運行與多輪穿越穩定性（模擬 6000 幀，約 100 秒）
   resetWorld();
   for (let frame = 0; frame < 6000; frame++) {
     updateNodes(1 / 60);
