@@ -6,12 +6,51 @@
 // 2. 低維生命無法主動升維，高維生命可穿越低維世界。
 // 3. 截游體（Section Drifter）是生活在三維空間的高維生命，週期性穿越二維生態層進行覓食。
 // 4. 二維觀察者永遠看不見牠的三維全貌，只能看見截面隨時間變化：
-//    · → ○ → ◯ → ○ ○ → ◯ → ○ → · → 消失。
-// 5. 捕食行為：當三維生命切過二維平面，落入截面範圍內的低維節點會被包入並帶離平面。
+//    混合型：偏心斷環 → 疊相分離與接回 → 包圍閉合 → 錯位恢復 → 離開平面。
+// 5. 混合型在捕食閉合時帶走包圍內的節點；legacy 模式保留原解析截面捕食。
 // =============================================================================
 
 const WORLD = { width: 1000, height: 460, limit: 140 };
 const MOTION = { neighborhood: 80, spacing: 36, turnRate: 1.65, wallMargin: 65 };
+
+// 截游體調校區：尺寸以世界座標計，時間以秒計；不影響其他生物。
+const DRIFTER = {
+  form: 'hybrid',               // 改成 'legacy' 可重現原本四種解析幾何形態
+  size: 1,
+  layers: 3,                   // 包含實體層；建議 2～4
+  arcSamples: 24,
+  phaseOffset: 11,
+  layerRotation: 0.3,
+  layerWarp: 0.22,
+  morphAmount: 1,               // 不規則變形幅度；0 可關閉，建議 0～1.3
+  morphPeriod: 3.8,             // 基礎變形時間，各部位使用不同長度
+  breath: 0.065,
+  breathRate: 1.45,
+  deformation: 0.095,
+  fragments: 5,
+  senseRadius: 175,
+  senseTime: 0.6,
+  feedReach: 115,
+  feedRadius: 43,
+  windup: 0.18,
+  burstTime: 0.22,
+  burstDistance: 105,
+  closeTime: 0.65,
+  recoveryTime: 1.1,
+  cooldown: 1.8,
+  moveSpeed: 27,
+  idleTime: 1.3,
+  moveTime: 3.8,
+  depthWander: 0.12,
+  // x/y 是各弧段的錨點；局部曲率中心由 radius、flatten、tilt 決定。
+  // 各組短弧朝向不同，不共同圍繞一個中心。
+  rings: [
+    { radius: 50, width: 3.6, x: -28, y: -25, tilt: -0.32, flatten: 0.72, span: 1.65, phase: 0.2, depth: -0.12 },
+    { radius: 31, width: 2.6, x: 29, y: 4, tilt: 1.18, flatten: 1.2, span: 1.95, phase: 2.1, depth: 0.19 },
+    { radius: 66, width: 1.7, x: -16, y: 37, tilt: -0.48, flatten: -0.55, span: 1.12, phase: 4.3, depth: 0.05 },
+    { radius: 22, width: 3, x: 43, y: -39, tilt: 0.42, flatten: -1.05, span: 1.85, phase: 5.2, depth: -0.3 }
+  ]
+};
 
 let nodes = [];
 let running = true;
@@ -62,9 +101,25 @@ class SectionDrifter {
     // 幾何形體與取樣
     this.samples = 128;         // 截面輪廓的取樣點數
     this.sections = [];         // 當前二維切面的多邊形頂點 [{points: [...]}]
+    this.bodyTime = 0;
+    this.state = 'Idle';
+    this.stateAge = 0;
+    this.target = null;
+    this.sense = { x: 0, y: 0 };
+    this.closure = 0;
+    this.phaseShock = 0;
+    this.shockStrength = 0;
+    this.feed = null;
+    this.contours = [];
+    this.bodyFragments = [];
+    this.enclosure = [];
 
     // 啟動第一輪穿越
     this.startPassage();
+    this.morphSeed = this.baseAngle * 9137.17;
+    this.morphology = [];
+    this.ripples = [];
+    this.echoes = [];
   }
 
   // 開始新一輪三維穿越
@@ -95,10 +150,372 @@ class SectionDrifter {
     this.pursuitOffsetX = 0;
     this.pursuitOffsetY = 0;
     this.phase = '截面進入';
+    this.dart = null;
+    this.dartOffset = { x: 0, y: 0 };
+    this.dartCooldown = random(0.7, 1.3);
+    if (this.shape.type === 'hybrid') {
+      this.x = this.path.start.x;
+      this.y = this.path.start.y;
+      this.target = null;
+      this.feed = null;
+      this.closure = 0;
+      this.phaseShock = 0;
+      this.shockStrength = 0;
+      this.state = 'Idle';
+      this.stateAge = 0;
+      this.sections = [];
+      this.contours = [];
+      this.bodyFragments = [];
+      this.enclosure = [];
+    }
+  }
+
+  setState(state) {
+    if (this.state === state) return;
+    this.state = state;
+    this.stateAge = 0;
+  }
+
+  smooth(value) {
+    const t = Math.max(0, Math.min(1, value));
+    return t * t * (3 - 2 * t);
+  }
+
+  // 感知保留同一目標直到離開範圍，避免在相鄰節點之間每幀跳動。
+  updateSensing(dt) {
+    if (this.target && (!nodes.includes(this.target) ||
+        Math.hypot(this.target.x - this.x, this.target.y - this.y) > DRIFTER.senseRadius * 1.2)) {
+      this.target = null;
+    }
+    if (!this.target && !this.feed && this.progress < 0.83) {
+      let distance = DRIFTER.senseRadius;
+      for (const n of nodes) {
+        const d = Math.hypot(n.x - this.x, n.y - this.y);
+        if (d < distance) { distance = d; this.target = n; }
+      }
+    }
+    let dx = 0, dy = 0;
+    if (this.target) {
+      const d = Math.max(1, Math.hypot(this.target.x - this.x, this.target.y - this.y));
+      dx = (this.target.x - this.x) / d;
+      dy = (this.target.y - this.y) / d;
+    }
+    const blend = 1 - Math.exp(-3 * dt);
+    this.sense.x += (dx - this.sense.x) * blend;
+    this.sense.y += (dy - this.sense.y) * blend;
+  }
+
+  // 移動與第三維的起伏分開；待機時留在原處，呼吸仍持續。
+  updateMovement(dt) {
+    if (this.feed) {
+      const f = this.feed;
+      const t = this.smooth((f.age - DRIFTER.windup) / DRIFTER.burstTime);
+      const recoil = f.age < DRIFTER.windup ? -0.05 * Math.sin(f.age / DRIFTER.windup * Math.PI) : 0;
+      this.x = f.from.x + (f.to.x - f.from.x) * (t + recoil);
+      this.y = f.from.y + (f.to.y - f.from.y) * (t + recoil);
+      if (t > 0 && t < 1) {
+        if (!f.released) {
+          this.ripples.push({ x: this.x, y: this.y, age: 0 });
+          f.released = true;
+        }
+        if (!this.echoes.length || this.echoes[this.echoes.length - 1].age > 0.04) {
+          this.echoes.push({ sections: this.sections, age: 0 });
+        }
+      }
+    } else if (this.state !== 'Idle') {
+      const goal = this.target || this.path.end;
+      const dx = goal.x - this.x, dy = goal.y - this.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const step = Math.min(distance, DRIFTER.moveSpeed * dt);
+      this.x += dx / distance * step;
+      this.y += dy / distance * step;
+    }
+    const margin = this.calcScreenRadius(this.shape) + 4;
+    this.x = Math.max(margin, Math.min(WORLD.width - margin, this.x));
+    this.y = Math.max(margin, Math.min(WORLD.height - margin, this.y));
+    const wobble = 0.16 * Math.sin(this.bodyTime * 0.37) + 0.08 * Math.sin(this.bodyTime * 0.83 + 1.7);
+    this.angle = this.baseAngle + wobble;
+    this.z = this.getDepth(this.progress) + this.extent * DRIFTER.depthWander *
+      Math.sin(Math.PI * this.progress) * Math.sin(this.bodyTime * 0.91);
+  }
+
+  beginFeeding() {
+    const target = this.target;
+    const dx = target.x + (target.vx || 0) * 0.2 - this.x;
+    const dy = target.y + (target.vy || 0) * 0.2 - this.y;
+    const ratio = Math.min(1, DRIFTER.burstDistance / Math.max(1, Math.hypot(dx, dy)));
+    this.feed = { age: 0, from: { x: this.x, y: this.y },
+      to: { x: this.x + dx * ratio, y: this.y + dy * ratio }, captured: false, released: false };
+    this.setState('Feeding');
+  }
+
+  // 只有斷環真正閉合時才吞入空缺內的節點，逃出包圍的獵物不會被遠距吸走。
+  updateFeeding() {
+    if (!this.feed) return;
+    const closeAt = DRIFTER.windup + DRIFTER.burstTime + DRIFTER.closeTime;
+    if (!this.feed.captured && this.feed.age >= closeAt) {
+      this.feed.captured = true;
+      let captured = 0;
+      nodes = nodes.filter(n => {
+        if (!this.pointInPolygon(n, this.enclosure)) return true;
+        this.held.push({ x: n.x, y: n.y, age: 0 });
+        captured++;
+        return false;
+      });
+      this.shockStrength = captured ? 1 : 0.25;
+      this.target = null;
+    }
+    if (this.feed.age >= closeAt + DRIFTER.recoveryTime) {
+      this.feed = null;
+      this.dartCooldown = DRIFTER.cooldown;
+      this.setState('Idle');
+    }
+  }
+
+  updateHybrid(dt) {
+    this.bodyTime += dt;
+    this.stateAge += dt;
+    this.dartCooldown -= dt;
+    const shockAge = this.feed ? Math.max(0, this.feed.age - DRIFTER.windup - DRIFTER.burstTime - DRIFTER.closeTime) : 0;
+    const shockTarget = this.feed ? this.shockStrength * Math.exp(-shockAge * 3 / DRIFTER.recoveryTime) : 0;
+    this.phaseShock += (shockTarget - this.phaseShock) * (1 - Math.exp(-18 * dt));
+    this.updateSensing(dt);
+    if (this.feed) {
+      this.feed.age += dt;
+    } else if (this.target && this.dartCooldown <= 0 && this.progress > 0.1 && this.progress < 0.83) {
+      this.setState('Sensing');
+      if (this.stateAge >= DRIFTER.senseTime &&
+          Math.hypot(this.target.x - this.x, this.target.y - this.y) < DRIFTER.feedReach) this.beginFeeding();
+    } else if (this.state === 'Sensing') {
+      this.setState('Moving');
+    } else if (this.stateAge > (this.state === 'Idle' ? DRIFTER.idleTime : DRIFTER.moveTime)) {
+      this.setState(this.state === 'Idle' ? 'Moving' : 'Idle');
+    }
+    this.updateMovement(dt);
+    const age = this.feed ? this.feed.age : 0;
+    const closeStart = DRIFTER.windup + DRIFTER.burstTime;
+    const recovery = this.smooth((age - closeStart - DRIFTER.closeTime) / DRIFTER.recoveryTime);
+    this.closure = this.feed ? this.smooth((age - closeStart) / DRIFTER.closeTime) * (1 - recovery) : 0;
+    this.sections = this.computeSections(this.progress);
+    this.updateFeeding();
+    const labels = { Idle: '待機・錯相呼吸', Moving: '移動・深度穿越', Sensing: '感知・偏向獵物', Feeding: '捕食・斷環包圍' };
+    this.phase = this.feed && this.feed.captured ? '捕食・相位錯位後恢復' : labels[this.state];
+  }
+
+  // 同一個不規則包圍邊界，同時供可見閉合輪廓及捕食判定使用。
+  enclosurePoint(a, size) {
+    // 偏折、有凹口的包圍邊界，閉合時也不回到主圓或眼形。
+    const knots = [[-1.12, -0.42], [-0.35, -0.95], [0.2, -0.38],
+      [1.12, 0], [0.65, 0.88], [-0.1, 0.38], [-0.65, 0.65]];
+    const t = ((a / TWO_PI % 1 + 1) % 1) * knots.length;
+    const k = Math.floor(t), u = t - k;
+    const p = [-1, 0, 1, 2].map(n => {
+      const index = (k + n + knots.length) % knots.length;
+      const drift = this.enclosureDrift?.[index] || { x: 0, y: 0 };
+      return [knots[index][0] + drift.x, knots[index][1] + drift.y];
+    });
+    const coordinate = axis => 0.5 * ((2 * p[1][axis]) + (-p[0][axis] + p[2][axis]) * u +
+      (2 * p[0][axis] - 5 * p[1][axis] + 4 * p[2][axis] - p[3][axis]) * u * u +
+      (-p[0][axis] + 3 * p[1][axis] - 3 * p[2][axis] + p[3][axis]) * u * u * u);
+    return this.toWorld(size * DRIFTER.feedRadius * coordinate(0), size * DRIFTER.feedRadius * coordinate(1));
+  }
+
+  // 每條時間軌各有不同的隨機目標；五次插值使接點的速度與加速度連續。
+  // 同一時間永遠取到同一值，繪圖時不抽 random，因此暫停與重畫不閃爍。
+  morphNoise(track, time) {
+    const period = Math.max(0.5, DRIFTER.morphPeriod) * (0.72 + (track % 7) * 0.137);
+    const position = time / period + track * 0.371;
+    const index = Math.floor(position), t = position - index;
+    const hash = n => {
+      const v = Math.sin(n * 127.1 + track * 311.7 + this.morphSeed) * 43758.5453;
+      return (v - Math.floor(v)) * 2 - 1;
+    };
+    const blend = t * t * t * (t * (t * 6 - 15) + 10);
+    return (hash(index) * (1 - blend) + hash(index + 1) * blend) * DRIFTER.morphAmount;
+  }
+
+  updateMorphology() {
+    this.morphology = DRIFTER.rings.map((ring, index) => {
+      const sample = channel => this.morphNoise(index * 11 + channel, this.bodyTime);
+      return { x: sample(0) * 12, y: sample(1) * 11, turn: sample(2) * 0.52,
+        curve: sample(3) * 0.4, stretch: 1 + sample(4) * 0.22,
+        depth: sample(5) * 0.24, split: sample(6), phase: sample(7) * 0.8 };
+    });
+    this.enclosureDrift = Array.from({ length: 7 }, (_, i) => ({
+      x: this.morphNoise(60 + i * 2, this.bodyTime) * 0.12,
+      y: this.morphNoise(61 + i * 2, this.bodyTime) * 0.12
+    }));
+  }
+
+  // 主體與延伸碎片共用同一條局部曲線；u 超過端點即延續缺失的截面。
+  arcPoint(ring, index, layer, u, size, senseX, senseY) {
+    const time = this.bodyTime, phase = ring.phase;
+    const morph = this.morphology[index];
+    const depth = this.z / this.extent + ring.depth + morph.depth + 0.11 * Math.sin(time * 0.61 + phase);
+    const slice = Math.sqrt(Math.max(0.04, 1 - Math.min(0.96, depth * depth)));
+    const breath = 1 + DRIFTER.breath * Math.sin(time * DRIFTER.breathRate + phase);
+    const layerPhase = phase + layer * 1.7 + morph.phase;
+    const turn = ring.tilt + morph.turn + 0.12 * Math.sin(time * 0.37 + phase) +
+      layer * DRIFTER.layerRotation * (index % 2 ? -1 : 1) * (0.8 + 0.35 * Math.sin(time * 0.29 + layerPhase));
+    const q = (u - 0.5) * ring.span * (1 + layer * 0.08 * Math.sin(time * 0.23 + layerPhase));
+    const radius = ring.radius * breath * morph.stretch * (0.6 + slice * 0.4);
+    const along = radius * Math.sin(q) * (1 + layer * 0.1 * Math.cos(layerPhase + time * 0.31));
+    const across = radius * (Math.cos(q) - 1) * (ring.flatten + morph.curve +
+      layer * DRIFTER.layerWarp * Math.sin(time * 0.41 + layerPhase)) +
+      DRIFTER.deformation * radius * Math.sin(q * 2 + phase + time * 0.3) * Math.sin(Math.PI * u);
+    const offset = layer * DRIFTER.phaseOffset * (1 + this.phaseShock * 1.2);
+    const ox = offset * (0.65 * Math.cos(layerPhase) + 0.35 * Math.sin(time * 0.43 + phase));
+    const oy = offset * (0.7 * Math.sin(layerPhase) + 0.3 * Math.cos(time * 0.37 + phase));
+    const x = ring.x + morph.x + along * Math.cos(turn) - across * Math.sin(turn) + ox + senseX * (4 + index);
+    const y = ring.y + morph.y + along * Math.sin(turn) + across * Math.cos(turn) + oy + senseY * (4 + index);
+    return { ...this.toWorld(size * x, size * y), normal: turn + Math.PI / 2 - q * ring.flatten + this.angle };
+  }
+
+  // 造型：四組偏心弧帶、少量錯位層，以及隨深度分離／接回的缺口。
+  computeHybridSections(progress) {
+    this.contours = [];
+    this.bodyFragments = [];
+    this.enclosure = [];
+    if (progress <= 0 || progress >= 1) return [];
+    this.updateMorphology();
+    const envelope = Math.pow(Math.sin(Math.PI * progress), 0.55);
+    const size = DRIFTER.size * envelope;
+    const time = this.bodyTime;
+    const sections = [];
+    const c = Math.cos(this.angle), s = Math.sin(this.angle);
+    const senseX = this.sense.x * c + this.sense.y * s;
+    const senseY = -this.sense.x * s + this.sense.y * c;
+    const closure = this.closure;
+    for (let index = 0; index < DRIFTER.rings.length; index++) {
+      const ring = DRIFTER.rings[index];
+      const phase = ring.phase;
+      const depth = this.z / this.extent + ring.depth + 0.11 * Math.sin(time * 0.61 + phase);
+      const morph = this.morphology[index];
+      const split = (1 - closure) * 0.17 * this.smooth((morph.split + depth) * 1.5 + 0.4);
+      for (let layer = DRIFTER.layers - 1; layer >= 0; layer--) {
+        for (const range of [[0, 0.53 - split / 2], [0.53 + split / 2, 1]]) {
+          const outer = [], inner = [], linePoints = [];
+          for (let j = 0; j <= DRIFTER.arcSamples; j++) {
+            const u = range[0] + (range[1] - range[0]) * j / DRIFTER.arcSamples;
+            const closedAngle = (index + u) / DRIFTER.rings.length * TWO_PI;
+            const closedWorld = this.enclosurePoint(closedAngle, size);
+            const freeWorld = this.arcPoint(ring, index, layer, u, size, senseX, senseY);
+            // 實體層閉合，其他深度仍保持自己的曲率與偏移，不同步描邊。
+            const join = Math.pow(closure, 0.8 + index * 0.28 + morph.phase * 0.15) * (layer ? 0.48 : 1);
+            const px = freeWorld.x * (1 - join) + closedWorld.x * join;
+            const py = freeWorld.y * (1 - join) + closedWorld.y * join;
+            const normalAngle = freeWorld.normal * (1 - join) + (closedAngle + this.angle) * join;
+            const thickness = size * ring.width * (0.4 + 0.6 * Math.sin(Math.PI * u) ** 2) * (layer ? 0.35 : 1);
+            linePoints.push({ x: px, y: py });
+            outer.push({ x: px + Math.cos(normalAngle) * thickness / 2, y: py + Math.sin(normalAngle) * thickness / 2 });
+            inner.push({ x: px - Math.cos(normalAngle) * thickness / 2, y: py - Math.sin(normalAngle) * thickness / 2 });
+          }
+          const section = { points: outer.concat(inner.reverse()), linePoints, layer, index };
+          this.contours.push(section);
+          if (layer === 0) sections.push(section);
+        }
+      }
+    }
+    for (let i = 0; i < 64; i++) this.enclosure.push(this.enclosurePoint(i / 64 * TWO_PI, size));
+    // 每塊碎片隸屬一組弧段，是該段端點之外的同曲率延伸。
+    for (let i = 0; i < DRIFTER.fragments; i++) {
+      const owner = i % DRIFTER.rings.length;
+      const ring = DRIFTER.rings[owner];
+      const side = i % 2 ? -1 : 1;
+      const gap = 0.09 + 0.025 * Math.sin(time * 0.48 + ring.phase);
+      const points = [];
+      for (let j = 0; j <= 8; j++) {
+        const u = (side > 0 ? 1 : 0) + side * (gap + j / 8 * (0.12 + i * 0.012));
+        points.push(this.arcPoint(ring, owner, 0, u, size, senseX, senseY));
+      }
+      this.bodyFragments.push({ owner, points });
+    }
+    return sections;
+  }
+
+  displayBody(scale) {
+    for (const contour of this.contours) {
+      fill(0, contour.layer ? 3 : 32);
+      stroke(0, contour.layer ? 42 / contour.layer : 155);
+      strokeWeight((contour.layer ? 0.55 : 0.75) / scale);
+      beginShape();
+      for (const p of contour.points) vertex(p.x, p.y);
+      endShape(CLOSE);
+    }
+    for (const f of this.bodyFragments) {
+      noFill();
+      stroke(0, 120);
+      strokeWeight(0.85 / scale);
+      beginShape();
+      for (const p of f.points) vertex(p.x, p.y);
+      endShape();
+    }
+    if (this.closure > 0.98) {
+      fill(0, 7 * this.closure);
+      noStroke();
+      beginShape();
+      for (const p of this.enclosure) vertex(p.x, p.y);
+      endShape(CLOSE);
+    }
+  }
+
+  // 從實際截面中心瞄準，環體的空洞不會被當成嘴巴。
+  updateDart(dt) {
+    this.dartCooldown -= dt;
+    if (!this.dart && this.dartCooldown <= 0 && this.progress > 0.1 && this.progress < 0.88) {
+      let target = null;
+      let nearest = 155;
+      for (const section of this.sections) {
+        const center = section.points.reduce((s, p) => ({
+          x: s.x + p.x / section.points.length, y: s.y + p.y / section.points.length
+        }), { x: 0, y: 0 });
+        for (const n of nodes) {
+          const distance = Math.hypot(n.x - center.x, n.y - center.y);
+          if (distance < 22 || distance >= nearest) continue;
+          nearest = distance;
+          target = { x: n.x + (n.vx || 0) * 0.18 - center.x,
+            y: n.y + (n.vy || 0) * 0.18 - center.y };
+        }
+      }
+      if (target) {
+        const ratio = Math.min(1, 105 / Math.hypot(target.x, target.y));
+        this.dart = { age: 0, x: target.x * ratio, y: target.y * ratio,
+          fromX: this.dartOffset.x, fromY: this.dartOffset.y, released: false };
+      }
+    }
+    if (this.dart) {
+      const dart = this.dart;
+      dart.age += dt;
+      // 0.18 秒蓄力、0.16 秒突進，再稍微滑行。
+      let amount;
+      if (dart.age < 0.18) {
+        amount = -0.07 * Math.sin(dart.age / 0.18 * Math.PI / 2);
+      } else {
+        if (!dart.released) {
+          this.ripples.push({ x: this.x, y: this.y, age: 0 });
+          dart.released = true;
+        }
+        const t = Math.min(1, (dart.age - 0.18) / 0.16);
+        amount = -0.07 + 1.07 * (1 - (1 - t) ** 3);
+        if (dart.age < 0.4 && (!this.echoes.length || this.echoes[this.echoes.length - 1].age > 0.035)) {
+          this.echoes.push({ sections: this.sections, age: 0 });
+        }
+      }
+      this.dartOffset.x = dart.fromX + dart.x * amount;
+      this.dartOffset.y = dart.fromY + dart.y * amount;
+      if (dart.age >= 0.55) {
+        this.dart = null;
+        this.dartCooldown = random(1.1, 2.4);
+      }
+    } else {
+      this.dartOffset.x *= Math.exp(-0.8 * dt);
+      this.dartOffset.y *= Math.exp(-0.8 * dt);
+    }
   }
 
   // 根據世界觀抽選三維形態
   chooseShape() {
+    if (DRIFTER.form === 'hybrid') return { type: 'hybrid', name: '斷環・疊相型', scale: DRIFTER.size };
     const roll = random();
     const scale = random(0.85, 1.35);
 
@@ -135,6 +552,7 @@ class SectionDrifter {
 
   // 計算三維形體在 Z 軸（深度）上的半徑跨度
   calcDepthExtent(shape) {
+    if (shape.type === 'hybrid') return 72 * DRIFTER.size;
     if (shape.type === 'sphere') return shape.radius;
     if (shape.type === 'ellipsoid') return shape.rz;
     if (shape.type === 'torus') return shape.major + shape.tube;
@@ -145,6 +563,7 @@ class SectionDrifter {
 
   // 計算形體在二維投影上的最大半徑，用於路徑邊界保護
   calcScreenRadius(shape) {
+    if (shape.type === 'hybrid') return (85 + (DRIFTER.layers - 1) * DRIFTER.phaseOffset * 3.8) * DRIFTER.size;
     if (shape.type === 'sphere') return shape.radius;
     if (shape.type === 'ellipsoid') return Math.hypot(shape.rx, shape.ry);
     if (shape.type === 'torus') return shape.major + shape.tube;
@@ -199,6 +618,7 @@ class SectionDrifter {
 
   // 解析求得當前切面邊界頂點
   computeSections(progress) {
+    if (this.shape.type === 'hybrid') return this.computeHybridSections(progress);
     if (progress <= 0 || progress >= 1) return [];
     const depth = this.getDepth(progress);
     const shape = this.shape;
@@ -287,6 +707,10 @@ class SectionDrifter {
   // 判斷點是否位於截游體實心幾何內部（捕食判定）
   insideSections(point) {
     if (!this.sections.length || this.isCruising) return false;
+    if (this.shape.type === 'hybrid') {
+      return this.sections.some(section => this.pointInPolygon(point, section.points)) ||
+        (this.closure > 0.999 && this.pointInPolygon(point, this.enclosure));
+    }
     const dx = point.x - this.x, dy = point.y - this.y;
     const c = Math.cos(this.angle), s = Math.sin(this.angle);
     const u = dx * c + dy * s, v = -dx * s + dy * c;
@@ -368,6 +792,14 @@ class SectionDrifter {
   // 每幀更新生命週期、位置、切面與捕食
   update(dt) {
     if (dt <= 0) return;
+    // 突進沿途檢查捕食，避免低幀率時直接跳過獵物。
+    if (dt > 1 / 120 + 1e-9) {
+      const steps = Math.ceil(dt * 120);
+      for (let i = 0; i < steps; i++) this.update(dt / steps);
+      return;
+    }
+    this.ripples = this.ripples.filter(r => (r.age += dt) < 0.8);
+    this.echoes = this.echoes.filter(e => (e.age += dt) < 0.24);
 
     // 1. 處理被包入節點的原地淡出（被帶離平面，進入三維）
     this.held = this.held.filter(n => {
@@ -387,7 +819,7 @@ class SectionDrifter {
     }
 
     // 3. 推進穿越進度
-    this.progress += dt / this.duration;
+    this.progress += dt / this.duration * (this.shape.type === 'hybrid' && this.feed ? 0.25 : 1);
 
     // 4. 穿越結束，進入三維巡游
     if (this.progress >= 1) {
@@ -395,9 +827,17 @@ class SectionDrifter {
       this.isCruising = true;
       this.cruiseTimer = this.restDuration;
       this.sections = [];
+      this.contours = [];
+      this.bodyFragments = [];
+      this.enclosure = [];
       this.phase = '三維巡游';
       this.consumed += this.held.length;
       this.held = [];
+      return;
+    }
+
+    if (this.shape.type === 'hybrid') {
+      this.updateHybrid(dt);
       return;
     }
 
@@ -430,8 +870,10 @@ class SectionDrifter {
       }
     }
 
-    this.x = bx + this.pursuitOffsetX;
-    this.y = by + this.pursuitOffsetY;
+    this.updateDart(dt);
+    const margin = this.calcScreenRadius(this.shape) + 4;
+    this.x = Math.max(margin, Math.min(WORLD.width - margin, bx + this.pursuitOffsetX + this.dartOffset.x));
+    this.y = Math.max(margin, Math.min(WORLD.height - margin, by + this.pursuitOffsetY + this.dartOffset.y));
     this.angle = this.baseAngle + this.spin * Math.sin(Math.PI * t);
     this.z = this.getDepth(t);
 
@@ -454,6 +896,8 @@ class SectionDrifter {
       this.phase = t < 0.5 ? `${this.shape.name}・進入平面` : `${this.shape.name}・離開平面`;
     }
 
+    if (this.dart) this.phase = this.dart.age < 0.18 ? '鎖定獵物・蓄力' : '瞬間突進・捕捉';
+
     // 8. 捕食機制（世界觀整理.txt 第九節）：
     // 截游體穿過平面，截面擴張把周圍的低維點包入，同伴隨之被帶離平面！
     if (this.sections.length > 0 && typeof nodes !== 'undefined') {
@@ -467,11 +911,28 @@ class SectionDrifter {
 
   // 繪製高維生物在二維平面的投影與截面輪廓
   display(scale = 1) {
-    if (this.isCruising && this.held.length === 0) return;
+    if (this.isCruising && this.held.length === 0 && this.ripples.length === 0 && this.echoes.length === 0) return;
     push();
+    noFill();
+    strokeWeight(0.7 / scale);
+    for (const echo of this.echoes) {
+      stroke(0, 38 * (1 - echo.age / 0.24));
+      for (const section of echo.sections) {
+        beginShape();
+        for (const p of section.points) vertex(p.x, p.y);
+        endShape(CLOSE);
+      }
+    }
+    for (const ripple of this.ripples) {
+      const t = ripple.age / 0.8;
+      stroke(0, 48 * (1 - t) ** 2);
+      circle(ripple.x, ripple.y, 12 + t * 95);
+      circle(ripple.x, ripple.y, 6 + t * 60);
+    }
 
-    // 繪製截面邊界（極淡填色、深色細輪廓、稀疏幾何標記點）
-    for (const section of this.sections) {
+    if (this.shape.type === 'hybrid') this.displayBody(scale);
+    // 保留原解析形態的繪圖，供 legacy 模式使用。
+    for (const section of this.shape.type === 'hybrid' ? [] : this.sections) {
       fill(0, 5);
       stroke(0, 110);
       strokeWeight(0.8 / scale);
@@ -565,7 +1026,7 @@ function setup() {
   const loadingEl = document.getElementById('loading');
   if (loadingEl) loadingEl.remove();
 
-  describe('黑白幾何生態層中，節點隨資訊流運動與群集。三維生命截游體週期性穿透平面，展現單截面與雙截面的幾何變化，並捕食低維資訊。');
+  describe('黑白幾何生態層中，節點隨資訊流運動與群集。截游體以偏心斷環、錯位疊相與少量身體碎片穿越平面，經歷待機、移動、感知及包圍閉合捕食。');
 
   // 快取 UI 元素
   for (const id of ['points', 'lines', 'planes', 'status', 'pause', 'drifter-type', 'drifter-phase', 'held', 'consumed', 'observation']) {

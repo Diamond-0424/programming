@@ -69,6 +69,143 @@ const sketchCode = fs.readFileSync(path.join(__dirname, '../sketch.js'), 'utf8')
 vm.runInContext(sketchCode, ctx);
 
 vm.runInContext(`
+  // 新造型：固定身體、連續變形、空缺與真正閉合的捕食判定。
+  resetWorld();
+  assert.equal(drifter.shape.type, 'hybrid');
+  const hybrid = drifter;
+  hybrid.x = 500;
+  hybrid.y = 230;
+  hybrid.progress = 0.5;
+  hybrid.duration = 1000;
+  hybrid.baseAngle = hybrid.angle = 0;
+  hybrid.z = 0;
+  nodes = [];
+  hybrid.sections = hybrid.computeSections(0.5);
+  assert.equal(hybrid.bodyFragments.length, DRIFTER.fragments);
+  assert.equal(hybrid.contours.length, DRIFTER.rings.length * DRIFTER.layers * 2);
+  const direction = curve => {
+    const a = curve.linePoints[0], b = curve.linePoints[curve.linePoints.length - 1];
+    return Math.atan2(b.y - a.y, b.x - a.x);
+  };
+  for (let index = 0; index < DRIFTER.rings.length; index++) {
+    const base = hybrid.contours.find(c => c.index === index && c.layer === 0);
+    const outer = hybrid.contours.find(c => c.index === index && c.layer === 2);
+    assert(Math.abs(Math.sin(direction(base) - direction(outer))) > 0.1,
+      '疊相必須有朝向差，不能只平移重描主輪廓');
+  }
+  for (const fragment of hybrid.bodyFragments) {
+    assert(fragment.owner >= 0 && fragment.owner < DRIFTER.rings.length);
+    assert(fragment.points.length >= 3, '碎片應是延伸弧段，不是裝飾點');
+    assert(fragment.points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y)));
+  }
+  assert(!hybrid.insideSections({x:500,y:230}), '待機中央空缺不可誤判為實體');
+  const stillBody = JSON.stringify(hybrid.contours);
+  hybrid.computeSections(0.5);
+  assert.equal(JSON.stringify(hybrid.contours), stillBody, '相同時間不可重新抽亂數造成閃爍');
+  // 隨機曲率連續演變，不是兩個固定形狀往返，也不在時間軌接點跳躍。
+  const morphFrames = [];
+  for (const time of [2, 6.3, 10.7, 15.1]) {
+    hybrid.bodyTime = time;
+    hybrid.computeSections(0.5);
+    morphFrames.push(JSON.stringify(hybrid.morphology));
+  }
+  assert.equal(new Set(morphFrames).size, 4, '不同時刻應產生不同的截面組合');
+  const track = 3;
+  const boundary = (3 - track * 0.371) * DRIFTER.morphPeriod * (0.72 + track * 0.137);
+  assert(Math.abs(hybrid.morphNoise(track, boundary - 0.0001) -
+    hybrid.morphNoise(track, boundary + 0.0001)) < 0.001, '隨機目標交接時不可突然跳變');
+  hybrid.bodyTime = 0;
+  hybrid.computeSections(0.5);
+  hybrid.update(0.1);
+  assert.equal(hybrid.state, 'Idle');
+  assert.equal(hybrid.x, 500, '待機時不漂移');
+  assert.notEqual(JSON.stringify(hybrid.contours), stillBody, '待機仍持續呼吸');
+  const frozenHybrid = JSON.stringify(hybrid);
+  hybrid.update(0);
+  assert.equal(JSON.stringify(hybrid), frozenHybrid, '暫停需凍結所有造型與狀態');
+  hybrid.update(DRIFTER.idleTime + 0.1);
+  assert.equal(hybrid.state, 'Moving');
+  const beforeMove = hybrid.x;
+  hybrid.update(0.1);
+  assert.notEqual(hybrid.x, beforeMove);
+
+  hybrid.x = 500;
+  hybrid.y = 230;
+  hybrid.progress = 0.5;
+  hybrid.dartCooldown = 0;
+  const prey = { x: 550, y: 230, vx: 0, vy: 0 };
+  nodes = [prey];
+  hybrid.update(0.1);
+  assert.equal(hybrid.state, 'Sensing');
+  assert(hybrid.sense.x > 0, '感知方向應朝向獵物');
+  nodes.push({x:hybrid.x + 1,y:230,vx:0,vy:0});
+  hybrid.update(0.1);
+  assert.equal(hybrid.target, prey, '新近鄰不應造成鎖定目標閃動');
+  nodes = [prey];
+  hybrid.update(DRIFTER.senseTime);
+  assert.equal(hybrid.state, 'Feeding');
+  assert.equal(nodes.length, 1, '未閉合之前不得吞入');
+  hybrid.update(DRIFTER.windup + DRIFTER.burstTime + DRIFTER.closeTime);
+  assert.equal(nodes.length, 0, '閉合後才能捕食空缺內的獵物');
+  assert.equal(hybrid.held.length, 1);
+  assert(hybrid.phaseShock > 0, '捕食後應出現相位錯位');
+  hybrid.update(DRIFTER.recoveryTime + 0.3);
+  assert.equal(hybrid.feed, null);
+  assert.equal(hybrid.state, 'Idle');
+  assert.equal(hybrid.consumed, 1);
+  assert.equal(hybrid.held.length, 0);
+  assert(hybrid.phaseShock < 0.08, '相位錯位應逐漸消退');
+
+  // 逃出包圍的獵物不會因為曾被鎖定而被遠端移除。
+  hybrid.target = {x:550,y:230,vx:0,vy:0};
+  nodes = [hybrid.target];
+  hybrid.beginFeeding();
+  nodes[0].x = 900;
+  hybrid.update(DRIFTER.windup + DRIFTER.burstTime + DRIFTER.closeTime + 0.05);
+  assert.equal(nodes.length, 1, '逃出包圍的獵物必須存活');
+  assert.equal(hybrid.consumed, 1, '空捕不可增加吞噬計數');
+  hybrid.display(1);
+
+  // 深度改變會使局部輪廓改變；完整離開觀察平面後不可殘留實體。
+  hybrid.closure = 0;
+  hybrid.z = 0;
+  hybrid.computeSections(0.5);
+  const middleBody = JSON.stringify(hybrid.contours);
+  hybrid.z = hybrid.extent * 0.7;
+  hybrid.computeSections(0.5);
+  assert.notEqual(JSON.stringify(hybrid.contours), middleBody);
+  assert.equal(hybrid.computeSections(1).length, 0);
+  assert.equal(hybrid.contours.length + hybrid.bodyFragments.length, 0);
+  console.log('PASS: 斷環疊相、四狀態、目標鎖定、閉合捕食、逃脫與恢復');
+`, ctx);
+
+vm.runInContext(`
+  resetWorld();
+  drifter.shape = { type: 'sphere', name: '球體', radius: 20, scale: 1 };
+  drifter.extent = 20;
+  drifter.path = { start: { x: 500, y: 230 }, middle: { x: 500, y: 230 }, end: { x: 500, y: 230 } };
+  drifter.x = 500;
+  drifter.y = 230;
+  drifter.progress = 0.5;
+  drifter.duration = 100;
+  drifter.sections = drifter.computeSections(0.5);
+  drifter.dartCooldown = 0;
+  nodes = [{ x: 590, y: 230, vx: 0, vy: 0 }];
+  drifter.update(0.18);
+  assert(drifter.dart, '附近有獵物時應蓄力');
+  assert(drifter.x < 505, '蓄力時不應提前衝到獵物');
+  const frozen = JSON.stringify(drifter);
+  drifter.update(0);
+  assert.equal(JSON.stringify(drifter), frozen, '暫停時動作與特效應凍結');
+  drifter.update(0.16);
+  assert(drifter.x > 570, '應在短時間內完成明顯位移');
+  assert.equal(nodes.length, 0, '突進應實際捕獲路徑上的獵物');
+  assert(drifter.ripples.length > 0 && drifter.echoes.length > 0, '突進應留下漣漪與殘影');
+  drifter.update(1);
+  assert.equal(drifter.echoes.length + drifter.ripples.length, 0, '特效應自行消退');
+`, ctx);
+
+vm.runInContext(`
   // 1. 驗證 SectionDrifter 類別與初始狀態
   assert(typeof SectionDrifter === 'function', 'SectionDrifter 必須是 ES6 類別');
   const d = new SectionDrifter();
@@ -190,6 +327,20 @@ vm.runInContext(`
     // 檢查坐標有效性
     assert(Number.isFinite(drifter.x) && Number.isFinite(drifter.y));
     assert(Number.isFinite(drifter.z));
+    assert.equal(nodes.length + drifter.held.length + drifter.consumed, 82, '節點總數應守恆');
+    assert(drifter.echoes.length <= 8 && drifter.ripples.length <= 2, '短暫特效不可無限累積');
+    assert(drifter.bodyFragments.length <= DRIFTER.fragments, '身體碎片數量固定');
+    for (const fragment of drifter.bodyFragments) {
+      for (const p of fragment.points) {
+        assert(p.x >= 0 && p.x <= WORLD.width && p.y >= 0 && p.y <= WORLD.height, '延伸截面不可離開畫布');
+      }
+    }
+    for (const contour of drifter.contours) {
+      for (const p of contour.points) {
+        assert(Number.isFinite(p.x) && Number.isFinite(p.y));
+        assert(p.x >= 0 && p.x <= WORLD.width && p.y >= 0 && p.y <= WORLD.height, '疊相輪廓不可離開畫布');
+      }
+    }
     for (const sec of drifter.sections) {
       for (const p of sec.points) {
         assert(Number.isFinite(p.x) && Number.isFinite(p.y));
