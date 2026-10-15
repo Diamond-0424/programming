@@ -165,7 +165,7 @@ class Explorer {
   }
 }
 const explorer=new Explorer();
-function renderCreature(meshes,breathing=breathingAt(clockTime)){
+function renderCreature(meshes,breathing=breathingAt(clockTime),appearance={opacity:1,nodeScale:1}){
   const axes=cameraAxes();
   const corePulse=breathing.nodeLight;
   // 參考 2026-10-15 圖片：明亮白線、黑心白邊節點，光暈只貼著輪廓。
@@ -180,18 +180,18 @@ function renderCreature(meshes,breathing=breathingAt(clockTime)){
       for(const [a,b] of mesh.edges){
         const depth=mesh.source4D ? (mesh.source4D[a][3]+mesh.source4D[b][3])/(2*Math.SQRT2*PARAMS.halfSize) : 0;
         const alpha=(halo?pass.alpha*PARAMS.glowStrength*breathing.glow*(layer?.5:1):(layer?150*corePulse:245))*(.96+.04*depth)*PARAMS.lineBrightness;
-        stroke(255,255,255,alpha);
+        stroke(255,255,255,alpha*appearance.opacity);
         vertex(...project3DToScreen(mesh.points[a]));vertex(...project3DToScreen(mesh.points[b]));
       }endShape();
     }
     // 面保持空白，避免把密集骨架填成一團發亮的實體。
     // 與骨架共用透視：近處圓點較大，遠處較小。
-    const radius=PARAMS.nodeRadius*(layer?.7:1);
+    const radius=PARAMS.nodeRadius*(layer?.7:1)*appearance.nodeScale;
     for(const pass of [{width:4,alpha:5},{width:2.4,alpha:11},{width:0,alpha:0}]){
     const halo=pass.width>0;
     if(halo){blendMode(ADD);noFill();}
-    else{blendMode(BLEND);fill(0);}
-    stroke(255,255,255,halo?pass.alpha*PARAMS.glowStrength*breathing.glow*(layer?.5:1):(layer?190:255)*breathing.nodeLight);
+    else{blendMode(BLEND);fill(0,255*appearance.opacity);}
+    stroke(255,255,255,(halo?pass.alpha*PARAMS.glowStrength*breathing.glow*(layer?.5:1):(layer?190:255)*breathing.nodeLight)*appearance.opacity);
     strokeWeight(halo?pass.width:PARAMS.nodeLineWidth*(layer?.75:1));
     for(const [index,point] of mesh.points.entries()){
       const perspective=mesh.source4D?PARAMS.projectionDistance/(PARAMS.projectionDistance-mesh.source4D[index][3]):1;
@@ -204,11 +204,375 @@ function renderCreature(meshes,breathing=breathingAt(clockTime)){
     }
   });blendMode(BLEND);
 }
+// 小生物保有獨立三維形體，不參與四維切面。
+function createFoodMeshes(){
+  const tetra=[[1,1,1],[1,-1,-1],[-1,1,-1],[-1,-1,1]];
+  const cube=[];
+  for(const x of [-1,1])for(const y of [-1,1])for(const z of [-1,1])cube.push([x,y,z]);
+  const octa=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  const prism=[];
+  for(const z of [-.8,.8])for(let i=0;i<3;i++)prism.push([Math.cos(i*Math.PI*2/3),Math.sin(i*Math.PI*2/3),z]);
+  const regular=(points,length)=>({points,faces:[],edges:points.flatMap((p,i)=>
+    points.slice(i+1).flatMap((q,j)=>Math.abs(Math.hypot(...sub(p,q))-length)<EPS?[[i,i+j+1]]:[]))});
+  return [regular(tetra,Math.sqrt(8)),regular(cube,2),regular(octa,Math.SQRT2),
+    {points:prism,faces:[],edges:[[0,1],[1,2],[2,0],[3,4],[4,5],[5,3],[0,3],[1,4],[2,5]]}];
+}
+const foodMeshes=createFoodMeshes();
+// 初始散落位置與形體；活動狀態由 Ecosystem 另外保存。
+const foodItems=[
+  {kind:0,position:[-235,-140,-100],size:12,phase:.3},
+  {kind:1,position:[210,-165,-160],size:12,phase:1.1},
+  {kind:2,position:[245,35,45],size:19,phase:2.2},
+  {kind:3,position:[95,190,-80],size:17,phase:.7},
+  {kind:1,position:[-180,145,75],size:11,phase:2.8},
+  {kind:2,position:[-260,25,-190],size:16,phase:1.7}
+];
+const LIFE={bounds:[290,200,210],danger:180,respawnDelay:12};
+const FX={consumeDuration:4.5,birthDuration:1.25,restitution:.45,maxEffects:48,
+  scatterTime:.6,absorbStrength:48,absorbRamp:.25,trailSamples:20};
+const safeDirection=v=>{const n=Math.hypot(...v);return n>EPS?v.map(x=>x/n):[1,0,0];};
+const clamp01=x=>Math.max(0,Math.min(1,x));
+const fragmentHalf=(f,age)=>f.half?rotatePlane(rotatePlane(f.half,0,2,age*f.spin),1,2,age*f.spin*.7):null;
+function smallCreaturePoints(food,time,growth=1,position=food.position){
+  return foodMeshes[food.kind].points.map(p=>{
+    let q=rotatePlane(p,0,2,food.phase+time*.12);
+    q=rotatePlane(q,1,2,food.phase*.7+time*.08);
+    return q.map((v,k)=>v*food.size*growth+position[k]);
+  });
+}
+// 有限線段的最近點；包含平行、端點與零長度情況。
+function segmentContact(p1,q1,p2,q2){
+  const d1=sub(q1,p1),d2=sub(q2,p2),r=sub(p1,p2);
+  const a=dot(d1,d1),e=dot(d2,d2),f=dot(d2,r);let s=0,t=0;
+  if(a<=EPS){t=e>EPS?clamp01(f/e):0;}
+  else{
+    const c=dot(d1,r);
+    if(e<=EPS)s=clamp01(-c/a);
+    else{
+      const b=dot(d1,d2),denom=a*e-b*b;
+      s=denom>EPS?clamp01((b*f-c*e)/denom):0;t=(b*s+f)/e;
+      if(t<0){t=0;s=clamp01(-c/a);}else if(t>1){t=1;s=clamp01((b-c)/a);}
+    }
+  }
+  const first=p1.map((v,k)=>v+d1[k]*s),second=p2.map((v,k)=>v+d2[k]*t);
+  return {first,second,distance:Math.hypot(...sub(first,second))};
+}
+function hunterCollisionMeshes(meshes,breathing,pose,time){
+  return meshes.map(mesh=>({...mesh,points:mesh.points.map(p=>{
+    let q=p.slice(0,3).map(v=>v*breathing.scale*pose.scale);
+    q=rotatePlane(q,0,1,pose.tilt+.012*Math.sin(time*.19));
+    return rotatePlane(q,0,2,-pose.turn-.022*Math.sin(time*.27));
+  })}));
+}
+class Ecosystem {
+  constructor(items,random=Math.random){
+    this.random=random;this.time=0;this.captures=0;this.effects=[];
+    this.prey=items.map((item,id)=>({...item,id,position:item.position.slice(),velocity:[0,0,0],
+      direction:this.randomDirection(),intent:0,energy:1,mode:'wander',alive:true,respawn:0,
+      birth:FX.birthDuration,radius:item.size*Math.max(...foodMeshes[item.kind].points.map(p=>Math.hypot(...p))),
+      mass:(item.size/12)**3}));
+    this.hunter={position:[0,0,0],velocity:[0,0,0],energy:1,hunger:.8,
+      mode:'wander',target:null,commit:0,cooldown:0,radius:32,mass:12};
+    this.hunterMeshes=[project4DTo3D(sample4DBody(generate4DBody(),0))];
+    this.hunterExtent=200;
+  }
+  emit(type,position,extra={}){
+    this.effects.push({type,position:position.slice(),age:0,
+      duration:type==='consume'?FX.consumeDuration:type==='birth'?FX.birthDuration:.4,...extra});
+    if(this.effects.length>FX.maxEffects)this.effects.shift();
+  }
+  collide(a,b){
+    const offset=sub(b.position,a.position),distance=Math.hypot(...offset),radius=a.radius+b.radius;
+    if(distance>=radius)return false;
+    const normal=safeDirection(offset),ia=1/a.mass,ib=1/b.mass,total=ia+ib;
+    // 依質量分攤重疊修正；只對彼此靠近的速度施加回彈衝量。
+    const overlap=radius-distance;
+    for(let k=0;k<3;k++){
+      a.position[k]-=normal[k]*overlap*ia/total;
+      b.position[k]+=normal[k]*overlap*ib/total;
+    }
+    const closing=dot(sub(b.velocity,a.velocity),normal);
+    if(closing<0){
+      const impulse=-(1+FX.restitution)*closing/total;
+      for(let k=0;k<3;k++){
+        a.velocity[k]-=normal[k]*impulse*ia;b.velocity[k]+=normal[k]*impulse*ib;
+      }
+      if(closing<-8)this.emit('impact',a.position.map((v,k)=>v+normal[k]*a.radius));
+    }
+    return true;
+  }
+  preyContact(p){
+    const h=this.hunter;
+    if(Math.hypot(...sub(p.position,h.position))>this.hunterExtent+p.radius+8)return null;
+    const growth=clamp01(p.birth/FX.birthDuration),size=growth*growth*(3-2*growth);
+    const points=smallCreaturePoints(p,this.time,size),edges=foodMeshes[p.kind].edges;
+    const thickness=PARAMS.lineWidth; // 兩條白線的合併半徑。
+    for(const mesh of this.hunterMeshes)for(const [ia,ib] of mesh.edges){
+      const a=mesh.points[ia].map((v,k)=>v+h.position[k]),b=mesh.points[ib].map((v,k)=>v+h.position[k]);
+      if(segmentContact(a,b,p.position,p.position).distance>p.radius+8)continue;
+      for(const point of points){
+        const hit=segmentContact(a,b,point,point);
+        if(hit.distance<=PARAMS.nodeRadius*size+thickness*.5)return hit;
+      }
+      for(const [i,j] of edges){
+        const hit=segmentContact(a,b,points[i],points[j]);
+        if(hit.distance<=thickness)return hit;
+        // 端點的空心圓以小球近似；不是整隻生物的包圍球。
+        for(const endpoint of [a,b]){
+          const nodeHit=segmentContact(endpoint,endpoint,points[i],points[j]);
+          if(nodeHit.distance<=PARAMS.nodeRadius+thickness*.5)return nodeHit;
+        }
+      }
+    }
+    return null;
+  }
+  shatter(p,hit){
+    const h=this.hunter;
+    // 以身體中心到接觸位置的方向定義外側，避免最近點法線指向骨架內部。
+    const radial=sub(hit.first,h.position);
+    const normal=safeDirection(Math.hypot(...radial)>EPS?radial:sub(p.position,h.position));
+    const closing=Math.min(0,dot(sub(p.velocity,h.velocity),normal));
+    const impulse=-(1+FX.restitution)*closing/(1/p.mass+1/h.mass);
+    for(let k=0;k<3;k++){p.velocity[k]+=normal[k]*impulse/p.mass;h.velocity[k]-=normal[k]*impulse/h.mass;}
+    const t=clamp01(p.birth/FX.birthDuration),points=smallCreaturePoints(p,this.time,t*t*(3-2*t));
+    const fragments=[];
+    const add=(position,half=null)=>{
+      const outward=safeDirection(sub(position,p.position)),speed=32+Math.min(75,-closing*.65);
+      // 碰撞後的速度拆成沿表面與朝外兩部分，所有碎片先向外半空間散開。
+      const tangent=outward.map((v,k)=>v-normal[k]*dot(outward,normal));
+      const relative=sub(p.velocity,h.velocity),normalSpeed=Math.max(28,dot(relative,normal)*.65+speed*.5);
+      const velocity=relative.map((v,k)=>h.velocity[k]+(v-normal[k]*dot(relative,normal))*.65+
+        tangent[k]*speed*.65+normal[k]*normalSpeed);
+      fragments.push({position:position.slice(),velocity,
+        half,spin:.7+fragments.length*.17,history:[position.slice()],absorbed:false});
+    };
+    points.forEach(point=>add(point));
+    for(const [a,b] of foodMeshes[p.kind].edges)add(points[a].map((v,k)=>(v+points[b][k])/2),
+      points[a].map((v,k)=>(points[b][k]-v)/2));
+    // 用包住整個可見骨架的支撐平面阻擋碎片，避免從鏤空線框穿入。
+    const surface=this.fragmentSurface(normal),clearance=Math.max(0,...fragments.map(f=>
+      surface+(f.half?Math.abs(dot(f.half,normal))+PARAMS.lineWidth/2:PARAMS.nodeRadius)-
+      dot(sub(f.position,h.position),normal)));
+    for(const f of fragments){
+      f.position=f.position.map((v,k)=>v+normal[k]*clearance);
+      f.history=[f.position.slice()];
+    }
+    this.emit('consume',p.position,{fragments,trailClock:0,normal,separation:normal.map(v=>v*clearance)});
+    this.emit('impact',hit.first);
+    p.alive=false;p.mode='captured';p.respawn=LIFE.respawnDelay;
+    this.captures++;h.hunger=Math.max(0,h.hunger-.6);h.energy=clamp01(h.energy+.2);
+    h.cooldown=3;h.target=null;h.mode='wander';
+  }
+  fragmentSurface(normal){
+    return Math.max(0,...this.hunterMeshes.flatMap(m=>m.points.map(p=>dot(p.slice(0,3),normal))))+PARAMS.nodeRadius+1;
+  }
+  blockFragment(f,effect){
+    const n=effect.normal,half=fragmentHalf(f,effect.age);
+    const extent=half?Math.abs(dot(half,n))+PARAMS.lineWidth/2:PARAMS.nodeRadius;
+    const penetration=this.fragmentSurface(n)+extent-dot(sub(f.position,this.hunter.position),n);
+    if(penetration<=0)return;
+    for(let k=0;k<3;k++)f.position[k]+=n[k]*penetration;
+    const inward=dot(sub(f.velocity,this.hunter.velocity),n);
+    if(inward<0)for(let k=0;k<3;k++)f.velocity[k]-=(1+FX.restitution)*inward*n[k];
+  }
+  updateFragments(effect,dt){
+    effect.trailClock+=dt;
+    const sample=effect.trailClock>=1/60;if(sample)effect.trailClock%=1/60;
+    for(const f of effect.fragments){
+      if(f.absorbed){if(sample)f.history.shift();continue;}
+      const attraction=effect.age>FX.scatterTime;
+      const pull=clamp01((effect.age-FX.scatterTime)/FX.absorbRamp);
+      for(let k=0;k<3;k++){
+        const acceleration=attraction?(this.hunter.position[k]-f.position[k])*FX.absorbStrength*pull-f.velocity[k]*14:-f.velocity[k]*1.8;
+        f.velocity[k]+=acceleration*dt;f.position[k]+=f.velocity[k]*dt;
+      }
+      if(!attraction)this.blockFragment(f,effect);
+      if(sample){f.history.push(f.position.slice());if(f.history.length>FX.trailSamples)f.history.shift();}
+      if(attraction&&Math.hypot(...sub(f.position,this.hunter.position))<7)f.absorbed=true;
+    }
+  }
+  resolveCollisions(visible){
+    if(visible)for(const p of this.prey)if(p.alive){const hit=this.preyContact(p);if(hit)this.shatter(p,hit);}
+    const live=this.prey.filter(p=>p.alive);
+    for(let pass=0;pass<3;pass++){
+      for(let i=0;i<live.length;i++)for(let j=i+1;j<live.length;j++)this.collide(live[i],live[j]);
+      for(const a of [...live,this.hunter])for(let k=0;k<3;k++){
+        if(Math.abs(a.position[k])>LIFE.bounds[k]){
+          a.position[k]=Math.sign(a.position[k])*LIFE.bounds[k];
+          if(a.velocity[k]*a.position[k]>0)a.velocity[k]*=-FX.restitution;
+        }
+      }
+    }
+  }
+  randomDirection(){return safeDirection([this.random()-.5,this.random()-.5,(this.random()-.5)*.7]);}
+  move(agent,direction,speed,dt,response){
+    const desired=safeDirection(direction).map(v=>v*speed);
+    for(let k=0;k<3;k++){
+      // 先柔和轉回活動區；最後一道限制避免低幀率穿出邊界。
+      const p=agent.position[k],limit=LIFE.bounds[k];
+      desired[k]-=Math.sign(p)*Math.max(0,Math.abs(p)-limit*.78)*2.5;
+    }
+    const length=Math.hypot(...desired),factor=length>speed?speed/length:1;
+    for(let k=0;k<3;k++){
+      agent.velocity[k]+=(desired[k]*factor-agent.velocity[k])*(1-Math.exp(-response*dt));
+      agent.position[k]+=agent.velocity[k]*dt;
+      if(Math.abs(agent.position[k])>LIFE.bounds[k]){
+        agent.position[k]=Math.sign(agent.position[k])*LIFE.bounds[k];agent.velocity[k]*=-.3;
+      }
+    }
+  }
+  update(dt,visible=true,heading=0,meshes=null){
+    if(!(dt>0))return;
+    if(meshes){this.hunterMeshes=meshes;this.hunterExtent=Math.max(0,...meshes.flatMap(m=>m.points.map(p=>Math.hypot(...p.slice(0,3)))));}
+    let remaining=Math.min(dt,.05);
+    while(remaining>EPS){const h=Math.min(remaining,1/120);this.step(h,visible,heading);remaining-=h;}
+  }
+  step(dt,visible,heading){
+    this.time+=dt;const h=this.hunter;
+    for(const effect of this.effects){effect.age+=dt;if(effect.fragments)this.updateFragments(effect,dt);}
+    this.effects=this.effects.filter(effect=>effect.age<effect.duration);
+    for(const p of this.prey){
+      if(!p.alive){
+        p.respawn-=dt;
+        if(p.respawn<=0){
+          // 新個體從離獵者最遠的邊緣進場，避免在牠面前立即被捕。
+          const candidates=Array.from({length:8},()=>{
+            const q=this.randomDirection();const extent=Math.max(...q.map((v,k)=>Math.abs(v)/LIFE.bounds[k]));
+            return q.map(v=>v/extent*.94);
+          });
+          candidates.sort((a,b)=>Math.hypot(...sub(b,h.position))-Math.hypot(...sub(a,h.position)));
+          p.position=candidates[0];p.velocity=[0,0,0];p.energy=1;p.alive=true;p.mode='wander';p.intent=0;
+          p.birth=0;this.emit('birth',p.position,{preyId:p.id});
+        }
+        continue;
+      }
+      p.birth=Math.min(FX.birthDuration,p.birth+dt);
+      const away=sub(p.position,h.position),distance=Math.hypot(...away);
+      const fleeing=visible&&distance<LIFE.danger;
+      p.energy=clamp01(p.energy+dt*(fleeing?-.09:.07));
+      p.mode=fleeing?'flee':p.energy<.45?'recover':'wander';
+      p.intent-=dt;
+      if(p.intent<=0){p.direction=this.randomDirection();p.intent=.8+this.random()*2;}
+      let direction=p.direction.slice();
+      if(fleeing){
+        const predicted=h.position.map((v,k)=>v+h.velocity[k]*.35);
+        direction=safeDirection(sub(p.position,predicted)).map((v,k)=>v*2+p.direction[k]*.65);
+      }
+      // 鄰近個體互相讓開；不強迫排成隊伍。
+      for(const other of this.prey)if(other!==p&&other.alive){
+        const offset=sub(p.position,other.position),d=Math.hypot(...offset);
+        if(d<55)direction=direction.map((v,k)=>v+safeDirection(offset)[k]*(1-d/55)*1.8);
+      }
+      const speed=fleeing?48+62*p.energy:p.mode==='recover'?13:24;
+      this.move(p,direction,speed,dt,4);
+    }
+    h.hunger=clamp01(h.hunger+dt*.022);h.cooldown=Math.max(0,h.cooldown-dt);h.commit-=dt;
+    const resting=h.energy<.2||(h.mode==='rest'&&h.energy<.72);
+    if(!visible||resting||h.cooldown>0||h.hunger<.35){
+      h.mode=!visible?'hidden':resting?'rest':'wander';h.target=null;
+    }else{
+      if(h.target===null||!this.prey[h.target]?.alive||h.commit<=0){
+        const candidates=this.prey.filter(p=>p.alive);
+        candidates.sort((a,b)=>Math.hypot(...sub(a.position,h.position))-Math.hypot(...sub(b.position,h.position)));
+        h.target=candidates[0]?.id??null;h.commit=5+this.random()*3;
+      }
+      h.mode=h.target===null?'wander':'hunt';
+    }
+    h.energy=clamp01(h.energy+dt*(h.mode==='hunt'?-.045:.085));
+    const target=this.prey[h.target];
+    let direction=[Math.cos(heading),Math.sin(heading),Math.sin(this.time*.23)*.4];
+    if(h.mode==='hunt'){
+      const lead=Math.min(.65,Math.hypot(...sub(target.position,h.position))/150);
+      direction=target.position.map((v,k)=>v+target.velocity[k]*lead-h.position[k]);
+    }
+    this.move(h,direction,h.mode==='hunt'?68+24*h.energy:h.mode==='rest'?6:18,dt,1.8);
+    this.resolveCollisions(visible);
+  }
+}
+const ecosystem=new Ecosystem(foodItems);
+function renderSmallCreature(food,time,growth=1,opacity=1,position=food.position){
+  const template=foodMeshes[food.kind];
+  const points=smallCreaturePoints(food,time,growth,position);
+  renderCreature([{...template,points}],{glow:.8,nodeLight:1},{opacity,nodeScale:growth});
+}
+function renderFood(time){
+  push();scale(Math.min(width,height)/560);
+  for(const food of ecosystem.prey){
+    if(!food.alive)continue;
+    const t=clamp01(food.birth/FX.birthDuration),growth=t*t*(3-2*t);
+    renderSmallCreature(food,time,growth,growth);
+  }
+  pop();
+}
+function renderConsumption(effect){
+  const axes=cameraAxes(),fade=clamp01((effect.duration-effect.age)/.5);
+  blendMode(ADD);noFill();
+  for(const fragment of effect.fragments){
+    // 歷史位置固定於世界座標，截游體移動時不會把整條殘影一起搬走。
+    for(let j=1;j<fragment.history.length;j++){
+      const strength=j/fragment.history.length;
+      strokeWeight(.35+strength);stroke(255,255,255,110*strength*strength*fade);
+      beginShape(LINES);vertex(...fragment.history[j-1]);vertex(...fragment.history[j]);endShape();
+    }
+    if(fragment.absorbed)continue;
+    const distance=Math.hypot(...sub(fragment.position,ecosystem.hunter.position));
+    const shrink=effect.age>FX.scatterTime?Math.min(1,distance/25):1;
+    for(const pass of [{width:4,alpha:18},{width:1.5,alpha:235}]){
+      strokeWeight(pass.width);stroke(255,255,255,pass.alpha*fade);
+      if(fragment.half){
+        const half=fragmentHalf(fragment,effect.age);
+        beginShape(LINES);
+        for(const sign of [-1,1])vertex(...fragment.position.map((v,k)=>v+sign*half[k]*shrink));
+        endShape();
+      }else{
+        beginShape();
+        for(let i=0;i<16;i++){
+          const a=i/16*Math.PI*2;
+          vertex(...fragment.position.map((v,k)=>v+PARAMS.nodeRadius*shrink*(Math.cos(a)*axes.right[k]+Math.sin(a)*axes.up[k])));
+        }
+        endShape(CLOSE);
+      }
+    }
+  }
+}
+function renderLifeEffects(time){
+  push();scale(Math.min(width,height)/560);
+  for(const effect of ecosystem.effects){
+    if(effect.type==='consume'){renderConsumption(effect,time);continue;}
+    const t=clamp01(effect.age/effect.duration),fade=Math.sin(Math.PI*t);
+    const birth=effect.type==='birth';
+    const center=birth?ecosystem.prey[effect.preyId].position:effect.position;
+    blendMode(ADD);noFill();
+    const radius=birth?8+42*t:3+18*t;
+    // 三個互相垂直的細光圈，保有三維空間感；不做全畫面閃光。
+    for(const pass of [{width:3,alpha:12},{width:1,alpha:110}]){
+      strokeWeight(pass.width);stroke(255,255,255,pass.alpha*fade);
+      for(const [a,b] of [[0,1],[1,2],[0,2]]){
+        beginShape();
+        for(let i=0;i<40;i++){
+          const angle=i/40*Math.PI*2,p=center.slice();
+          p[a]+=Math.cos(angle)*radius;p[b]+=Math.sin(angle)*radius;vertex(...p);
+        }
+        endShape(CLOSE);
+      }
+    }
+    // 新生與碰撞沿固定方向向外散，不消耗行為亂數。
+    strokeWeight(1);stroke(255,255,255,140*fade);beginShape(LINES);
+    for(let i=0;i<12;i++){
+      const z=1-2*(i+.5)/12,angle=i*2.399963,r=Math.sqrt(1-z*z);
+      const direction=[r*Math.cos(angle),r*Math.sin(angle),z];
+      for(const d of [radius,radius+7*(1-t)])
+        vertex(...center.map((v,k)=>v+direction[k]*d));
+    }
+    endShape();
+  }
+  blendMode(BLEND);pop();
+}
 function resetView(){observationCamera.camera(0,-115,440,0,0,0,0,1,0);observationCamera.perspective(Math.PI/3,width/height,1,4000);}
 function setup(){
   const host=document.getElementById('canvas-host');const canvas=createCanvas(host?host.clientWidth:windowWidth,host?host.clientHeight:windowHeight,WEBGL);
   if(host)canvas.parent(host);pixelDensity(Math.min(window.devicePixelRatio||1,2));observationCamera=createCamera();resetView();body=generate4DBody();
-  document.getElementById('loading')?.remove();describe('24 胞體以密集交錯直線與空心圓節點呈現，可切換完整四維骨架投影和真正三維截面。');
+  document.getElementById('loading')?.remove();describe('白色線框截游體在三維空間追捕會逃跑的小生物，可切換完整四維骨架投影和真正三維截面，並暫停觀察。');
   const mode=document.getElementById('view-mode');if(mode){mode.value=viewMode;mode.onchange=()=>{viewMode=mode.value;updateModeLabels();};}updateModeLabels();
   const pause=document.getElementById('pause');if(pause)pause.onclick=()=>{paused=!paused;pause.textContent=paused?'繼續':'暫停';pause.setAttribute('aria-pressed',String(paused));};
   const reset=document.getElementById('reset');if(reset)reset.onclick=resetView;
@@ -222,22 +586,29 @@ function updateModeLabels(){
 }
 function draw(){
   background(0);orbitControl(1,1,.65);
-  if(!paused){const dt=Math.max(0,Math.min(deltaTime/1000,.05));clockTime+=dt;explorer.update(dt);}
+  const dt=paused?0:Math.max(0,Math.min(deltaTime/1000,.05));
+  if(!paused){clockTime+=dt;explorer.update(dt);}
   const s=PARAMS.slicePosition+PARAMS.halfSize*1.48*Math.sin(clockTime*PARAMS.sliceSpeed);
   // 預設整體骨架投影符合參考圖的密集交錯；切換後才計算 w=s。
   section=viewMode==='projection'?[project4DTo3D(sample4DBody(body,clockTime))]:
     PARAMS.shellLevels.map(level=>sliceWith3DSpace(sample4DBody(body,clockTime,level),s));
   // 整體極輕微地收縮、舒展，像緩慢呼吸；不改動母體幾何或切面計算。
   const breathing=breathingAt(clockTime);
-  const exploring=explorer.pose(),axes=cameraAxes();
+  const exploring=explorer.pose();
+  ecosystem.update(dt,section.some(mesh=>mesh.edges.length>0),explorer.heading,
+    hunterCollisionMeshes(section,breathing,exploring,clockTime));
+  renderFood(clockTime);
   const travelSize=Math.min(width,height);
   push();
-  // 留出游動空間，沿相機的左右／上下探索，轉動視角後也看得到位移。
-  translate(...axes.right.map((v,k)=>v*exploring.x*travelSize*.125+axes.up[k]*exploring.y*travelSize*.1));
+  // 捕食者與獵物共用世界座標，環視不會改變追捕方向或距離。
+  translate(...ecosystem.hunter.position.map(v=>v*travelSize/560));
   rotateY(exploring.turn+.022*Math.sin(clockTime*.27));rotateZ(exploring.tilt+.012*Math.sin(clockTime*.19));
   scale(travelSize/560*breathing.scale*exploring.scale);renderCreature(section,breathing);pop();
+  renderLifeEffects(clockTime);
   const status=document.getElementById('slice-status');
   if(status)status.textContent=viewMode==='projection'?'完整骨架投影 · 24 節點 / 96 邊':
     'w = '+s.toFixed(1)+' / '+(section[0].faces.length?section[0].faces.length+' 面截體':'離開觀察空間');
+  if(status)status.textContent+=' · '+({hunt:'追捕',rest:'休息',wander:'游走',hidden:'潛伏'}[ecosystem.hunter.mode])+
+    ' · 小生物 '+ecosystem.prey.filter(p=>p.alive).length+'/6 · 捕捉 '+ecosystem.captures;
 }
 function windowResized(){const host=document.getElementById('canvas-host');resizeCanvas(host?host.clientWidth:windowWidth,host?host.clientHeight:windowHeight);resetView();}
