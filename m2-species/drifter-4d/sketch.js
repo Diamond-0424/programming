@@ -229,7 +229,7 @@ const foodItems=[
 ];
 const LIFE={bounds:[290,200,210],danger:180,respawnDelay:12};
 const FX={consumeDuration:4.5,birthDuration:1.25,restitution:.45,maxEffects:48,
-  scatterTime:.6,absorbStrength:48,absorbRamp:.25,trailSamples:20};
+  squishTime:.18,scatterTime:.75,absorbStrength:48,absorbRamp:.25,trailSamples:22,viscosity:3.4};
 const safeDirection=v=>{const n=Math.hypot(...v);return n>EPS?v.map(x=>x/n):[1,0,0];};
 const clamp01=x=>Math.max(0,Math.min(1,x));
 const fragmentHalf=(f,age)=>f.half?rotatePlane(rotatePlane(f.half,0,2,age*f.spin),1,2,age*f.spin*.7):null;
@@ -272,7 +272,9 @@ class Ecosystem {
       birth:FX.birthDuration,radius:item.size*Math.max(...foodMeshes[item.kind].points.map(p=>Math.hypot(...p))),
       mass:(item.size/12)**3}));
     this.hunter={position:[0,0,0],velocity:[0,0,0],energy:1,hunger:.8,
-      mode:'wander',target:null,commit:0,cooldown:0,radius:32,mass:12};
+      mode:'wander',target:null,commit:0,cooldown:0,radius:32,mass:12,
+      jiggle:0,jiggleNormal:[1,0,0],
+      pulseTime:0,somersaultTimer:0,somersaultCooldown:7+this.random()*6};
     this.hunterMeshes=[project4DTo3D(sample4DBody(generate4DBody(),0))];
     this.hunterExtent=200;
   }
@@ -337,14 +339,24 @@ class Ecosystem {
     const t=clamp01(p.birth/FX.birthDuration),points=smallCreaturePoints(p,this.time,t*t*(3-2*t));
     const fragments=[];
     const add=(position,half=null)=>{
-      const outward=safeDirection(sub(position,p.position)),speed=32+Math.min(75,-closing*.65);
-      // 碰撞後的速度拆成沿表面與朝外兩部分，所有碎片先向外半空間散開。
-      const tangent=outward.map((v,k)=>v-normal[k]*dot(outward,normal));
-      const relative=sub(p.velocity,h.velocity),normalSpeed=Math.max(28,dot(relative,normal)*.65+speed*.5);
+      const outward=safeDirection(sub(position,p.position));
+      // 隨機散射風暴：每個碎片具備不同速度、擾動角度與自轉，形成範圍更廣、更自然的微觀噴散
+      const rndDir=safeDirection([this.random()-.5,this.random()-.5,this.random()-.5]);
+      const mixed=safeDirection(outward.map((v,k)=>v*.55+rndDir[k]*.6));
+      const speed=(54+this.random()*58)+Math.min(95,-closing*.75);
+      const tangent=mixed.map((v,k)=>v-normal[k]*dot(mixed,normal));
+      const relative=sub(p.velocity,h.velocity);
+      const normalSpeed=Math.max(36,Math.abs(dot(rndDir,normal))*24+dot(relative,normal)*.65+speed*.52);
       const velocity=relative.map((v,k)=>h.velocity[k]+(v-normal[k]*dot(relative,normal))*.65+
-        tangent[k]*speed*.65+normal[k]*normalSpeed);
+        tangent[k]*speed*.98+normal[k]*normalSpeed);
+      const spin=(this.random()*2.4+1.3)*(this.random()>.5?1:-1);
+      const driftPhase=this.random()*Math.PI*2,driftFreq=2.2+this.random()*3.2,driftAmp=1.8+this.random()*2.8;
+      const swirlAxis=safeDirection([this.random()-.5,this.random()-.5,this.random()-.5]);
+      const swirlSpeed=(this.random()*32+26)*(this.random()>.5?1:-1);
+      const wavePhase=this.random()*Math.PI*2,waveFreq=2.6+this.random()*3.2,waveAmp=16+this.random()*18;
       fragments.push({position:position.slice(),velocity,
-        half,spin:.7+fragments.length*.17,history:[position.slice()],absorbed:false});
+        half,spin,driftPhase,driftFreq,driftAmp,swirlAxis,swirlSpeed,wavePhase,waveFreq,waveAmp,
+        history:[position.slice()],absorbed:false});
     };
     points.forEach(point=>add(point));
     for(const [a,b] of foodMeshes[p.kind].edges)add(points[a].map((v,k)=>(v+points[b][k])/2),
@@ -357,8 +369,11 @@ class Ecosystem {
       f.position=f.position.map((v,k)=>v+normal[k]*clearance);
       f.history=[f.position.slice()];
     }
-    this.emit('consume',p.position,{fragments,trailClock:0,normal,separation:normal.map(v=>v*clearance)});
+    this.emit('consume',p.position,{fragments,trailClock:0,normal,separation:normal.map(v=>v*clearance),
+      kind:p.kind,size:p.size,phase:p.phase,birth:p.birth});
     this.emit('impact',hit.first);
+    h.jiggle=1;h.jiggleNormal=normal.slice();
+    h.somersaultTimer=2.4;h.somersaultCooldown=10+this.random()*6;
     p.alive=false;p.mode='captured';p.respawn=LIFE.respawnDelay;
     this.captures++;h.hunger=Math.max(0,h.hunger-.6);h.energy=clamp01(h.energy+.2);
     h.cooldown=3;h.target=null;h.mode='wander';
@@ -382,8 +397,27 @@ class Ecosystem {
       if(f.absorbed){if(sample)f.history.shift();continue;}
       const attraction=effect.age>FX.scatterTime;
       const pull=clamp01((effect.age-FX.scatterTime)/FX.absorbRamp);
+      const drag=attraction?9.5:FX.viscosity;
+      const toHunter=sub(this.hunter.position,f.position);
+      const dist=Math.hypot(...toHunter);
+      const inDir=safeDirection(toHunter);
+      const axis=f.swirlAxis||[0,1,0];
+      const swirlRaw=cross(inDir,axis);
+      const swirlDir=safeDirection(Math.hypot(...swirlRaw)>EPS?swirlRaw:[0,1,0]);
+      const waveDir=safeDirection(cross(inDir,swirlDir));
+      // 大幅度有感的橫向螺旋與波浪速度（與向心速度相當，確保視覺呈現顯著螺旋弧線）
+      const swirlSpeed=attraction?(f.swirlSpeed||46)*pull*Math.min(1.8,0.25+dist/26):0;
+      const waveSpeed=attraction?(f.waveAmp||32)*pull*Math.sin(effect.age*(f.waveFreq||3.5)+(f.wavePhase||0))*Math.min(1.5,0.2+dist/24):0;
+      const inSpeed=attraction?(32+dist*0.72)*pull:0;
+      const wPhase=effect.age*(f.driftFreq||3.2)+(f.driftPhase||0),wAmp=!attraction?(f.driftAmp||2.2):0;
+      const drift=[Math.cos(wPhase)*wAmp*.7,Math.sin(wPhase)*wAmp,Math.sin(wPhase*.7)*wAmp*.5];
       for(let k=0;k<3;k++){
-        const acceleration=attraction?(this.hunter.position[k]-f.position[k])*FX.absorbStrength*pull-f.velocity[k]*14:-f.velocity[k]*1.8;
+        const targetVel=attraction?
+          (inDir[k]*inSpeed + swirlDir[k]*swirlSpeed + waveDir[k]*waveSpeed) :
+          drift[k];
+        const acceleration=attraction?
+          (targetVel-f.velocity[k])*drag :
+          -f.velocity[k]*drag+drift[k];
         f.velocity[k]+=acceleration*dt;f.position[k]+=f.velocity[k]*dt;
       }
       if(!attraction)this.blockFragment(f,effect);
@@ -467,6 +501,26 @@ class Ecosystem {
       this.move(p,direction,speed,dt,4);
     }
     h.hunger=clamp01(h.hunger+dt*.022);h.cooldown=Math.max(0,h.cooldown-dt);h.commit-=dt;
+    if(h.jiggle>0)h.jiggle=Math.max(0,h.jiggle-dt*3.5);
+    // 水母脈衝推進與四維特技伸展計時
+    h.pulseTime+=dt;
+    h.somersaultCooldown-=dt;
+    if(h.somersaultCooldown<=0&&h.mode==='wander'){
+      h.somersaultTimer=2.4;h.somersaultCooldown=10+this.random()*8;
+    }
+    if(h.somersaultTimer>0)h.somersaultTimer=Math.max(0,h.somersaultTimer-dt);
+    const pulsePeriod=h.mode==='hunt'?1.4:h.mode==='rest'?3.6:2.4;
+    const pulsePhase=(h.pulseTime%pulsePeriod)/pulsePeriod;
+    let pulseSpeedMult=1;
+    if(pulsePhase<0.26){
+      pulseSpeedMult=0.45+0.55*(1-Math.sin(Math.PI*pulsePhase/0.26));
+    }else if(pulsePhase<0.52){
+      const u=(pulsePhase-0.26)/0.26;
+      pulseSpeedMult=0.45+(h.mode==='hunt'?0.76:0.95)*Math.sin(Math.PI*u);
+    }else{
+      const u=(pulsePhase-0.52)/0.48;
+      pulseSpeedMult=1.0+0.38*Math.exp(-3.5*u);
+    }
     const resting=h.energy<.2||(h.mode==='rest'&&h.energy<.72);
     if(!visible||resting||h.cooldown>0||h.hunger<.35){
       h.mode=!visible?'hidden':resting?'rest':'wander';h.target=null;
@@ -485,7 +539,8 @@ class Ecosystem {
       const lead=Math.min(.65,Math.hypot(...sub(target.position,h.position))/150);
       direction=target.position.map((v,k)=>v+target.velocity[k]*lead-h.position[k]);
     }
-    this.move(h,direction,h.mode==='hunt'?68+24*h.energy:h.mode==='rest'?6:18,dt,1.8);
+    const baseSpeed=h.mode==='hunt'?68+24*h.energy:h.mode==='rest'?6:18;
+    this.move(h,direction,baseSpeed*pulseSpeedMult,dt,2.0);
     this.resolveCollisions(visible);
   }
 }
@@ -504,21 +559,51 @@ function renderFood(time){
   }
   pop();
 }
-function renderConsumption(effect){
+function renderConsumption(effect,time=0){
   const axes=cameraAxes(),fade=clamp01((effect.duration-effect.age)/.5);
   blendMode(ADD);noFill();
+  if(effect.age<FX.squishTime&&effect.kind!==undefined){
+    const u=clamp01(effect.age/FX.squishTime);
+    const squish=Math.sin(Math.PI*u);
+    const comp=1-0.54*squish,bulge=1+0.29*squish;
+    const jitter=Math.sin(u*44)*squish*0.07;
+    const n=effect.normal,center=effect.position.map((v,k)=>v+effect.separation[k]);
+    const growth=clamp01((effect.birth||FX.birthDuration)/FX.birthDuration);
+    const sz=growth*growth*(3-2*growth);
+    const base=smallCreaturePoints({kind:effect.kind,size:effect.size,phase:effect.phase||0},time,sz,[0,0,0]);
+    const squished=base.map(p=>{
+      const proj=dot(p,n),perp=sub(p,n.map(v=>v*proj));
+      return center.map((v,k)=>v+n[k]*proj*(comp+jitter)+perp[k]*(bulge-jitter*.5));
+    });
+    const squishAlpha=(1-u*u)*fade;
+    for(const pass of [{width:3.5,alpha:22},{width:1.5,alpha:220}]){
+      strokeWeight(pass.width);stroke(255,255,255,pass.alpha*squishAlpha);
+      for(const [a,b] of foodMeshes[effect.kind].edges){
+        beginShape(LINES);vertex(...squished[a]);vertex(...squished[b]);endShape();
+      }
+      for(const pt of squished){
+        beginShape();
+        for(let i=0;i<16;i++){
+          const angle=i/16*Math.PI*2;
+          vertex(...pt.map((v,k)=>v+PARAMS.nodeRadius*bulge*(Math.cos(angle)*axes.right[k]+Math.sin(angle)*axes.up[k])));
+        }
+        endShape(CLOSE);
+      }
+    }
+  }
+  const burstFade=effect.age<FX.squishTime?clamp01(effect.age/FX.squishTime):1;
   for(const fragment of effect.fragments){
     // 歷史位置固定於世界座標，截游體移動時不會把整條殘影一起搬走。
     for(let j=1;j<fragment.history.length;j++){
       const strength=j/fragment.history.length;
-      strokeWeight(.35+strength);stroke(255,255,255,110*strength*strength*fade);
+      strokeWeight(.35+strength);stroke(255,255,255,110*strength*strength*fade*burstFade);
       beginShape(LINES);vertex(...fragment.history[j-1]);vertex(...fragment.history[j]);endShape();
     }
     if(fragment.absorbed)continue;
     const distance=Math.hypot(...sub(fragment.position,ecosystem.hunter.position));
     const shrink=effect.age>FX.scatterTime?Math.min(1,distance/25):1;
     for(const pass of [{width:4,alpha:18},{width:1.5,alpha:235}]){
-      strokeWeight(pass.width);stroke(255,255,255,pass.alpha*fade);
+      strokeWeight(pass.width);stroke(255,255,255,pass.alpha*fade*burstFade);
       if(fragment.half){
         const half=fragmentHalf(fragment,effect.age);
         beginShape(LINES);
@@ -543,7 +628,7 @@ function renderLifeEffects(time){
     const birth=effect.type==='birth';
     const center=birth?ecosystem.prey[effect.preyId].position:effect.position;
     blendMode(ADD);noFill();
-    const radius=birth?8+42*t:3+18*t;
+    const radius=birth?8+42*t:3+26*(1-(1-t)*(1-t));
     // 三個互相垂直的細光圈，保有三維空間感；不做全畫面閃光。
     for(const pass of [{width:3,alpha:12},{width:1,alpha:110}]){
       strokeWeight(pass.width);stroke(255,255,255,pass.alpha*fade);
@@ -551,7 +636,8 @@ function renderLifeEffects(time){
         beginShape();
         for(let i=0;i<40;i++){
           const angle=i/40*Math.PI*2,p=center.slice();
-          p[a]+=Math.cos(angle)*radius;p[b]+=Math.sin(angle)*radius;vertex(...p);
+          const ripple=birth?1:1+0.07*Math.sin(angle*6+t*12);
+          p[a]+=Math.cos(angle)*radius*ripple;p[b]+=Math.sin(angle)*radius*ripple;vertex(...p);
         }
         endShape(CLOSE);
       }
@@ -588,10 +674,15 @@ function draw(){
   background(0);orbitControl(1,1,.65);
   const dt=paused?0:Math.max(0,Math.min(deltaTime/1000,.05));
   if(!paused){clockTime+=dt;explorer.update(dt);}
-  const s=PARAMS.slicePosition+PARAMS.halfSize*1.48*Math.sin(clockTime*PARAMS.sliceSpeed);
+  const h=ecosystem.hunter;
+  // 特技翻滾時，4D 旋轉速度暴增，胞體翻轉像伸展筋骨般開花
+  const somersaultU=h.somersaultTimer>0?(1-h.somersaultTimer/2.4):0;
+  const somersaultProgress=h.somersaultTimer>0?Math.sin(Math.PI*somersaultU):0;
+  const hyperTime=clockTime+somersaultProgress*1.8;
+  const s=PARAMS.slicePosition+PARAMS.halfSize*1.48*Math.sin(hyperTime*PARAMS.sliceSpeed);
   // 預設整體骨架投影符合參考圖的密集交錯；切換後才計算 w=s。
-  section=viewMode==='projection'?[project4DTo3D(sample4DBody(body,clockTime))]:
-    PARAMS.shellLevels.map(level=>sliceWith3DSpace(sample4DBody(body,clockTime,level),s));
+  section=viewMode==='projection'?[project4DTo3D(sample4DBody(body,hyperTime))]:
+    PARAMS.shellLevels.map(level=>sliceWith3DSpace(sample4DBody(body,hyperTime,level),s));
   // 整體極輕微地收縮、舒展，像緩慢呼吸；不改動母體幾何或切面計算。
   const breathing=breathingAt(clockTime);
   const exploring=explorer.pose();
@@ -600,15 +691,38 @@ function draw(){
   renderFood(clockTime);
   const travelSize=Math.min(width,height);
   push();
-  // 捕食者與獵物共用世界座標，環視不會改變追捕方向或距離。
-  translate(...ecosystem.hunter.position.map(v=>v*travelSize/560));
-  rotateY(exploring.turn+.022*Math.sin(clockTime*.27));rotateZ(exploring.tilt+.012*Math.sin(clockTime*.19));
-  scale(travelSize/560*breathing.scale*exploring.scale);renderCreature(section,breathing);pop();
+  // 水母脈衝 Squash & Stretch（噴射時沿移動方向伸長，蓄力時壓扁）
+  const pPeriod=h.mode==='hunt'?1.4:h.mode==='rest'?3.6:2.4;
+  const pPhase=(h.pulseTime%pPeriod)/pPeriod;
+  let stretchZ=1;
+  if(pPhase<0.26){
+    stretchZ=1-0.14*Math.sin(Math.PI*pPhase/0.26);
+  }else if(pPhase<0.52){
+    stretchZ=1+0.22*Math.sin(Math.PI*(pPhase-0.26)/0.26);
+  }else{
+    stretchZ=1+0.08*Math.exp(-3.5*(pPhase-0.52)/0.48);
+  }
+  const stretchXY=1/Math.sqrt(Math.max(0.4,stretchZ));
+  // 3D 特技立體桶滾（Barrel Roll）與開花舒展（Bloom）
+  const rollAngle=h.somersaultTimer>0?Math.sin(Math.PI*somersaultU)*Math.PI*2:0;
+  const bloomScale=h.somersaultTimer>0?(1+0.24*somersaultProgress):1;
+  const jiggleOffset=h.jiggle>0?Math.sin(clockTime*48)*h.jiggle*3.2:0;
+  const hPos=h.position.map((v,k)=>
+    (v+(h.jiggleNormal?h.jiggleNormal[k]*jiggleOffset:0))*travelSize/560);
+  translate(...hPos);
+  rotateY(exploring.turn+.022*Math.sin(clockTime*.27));
+  rotateZ(exploring.tilt+.012*Math.sin(clockTime*.19)+rollAngle);
+  const jiggleScale=1+(h.jiggle>0?Math.sin(clockTime*36)*h.jiggle*0.035:0);
+  const baseScale=travelSize/560*breathing.scale*exploring.scale*jiggleScale*bloomScale;
+  scale(baseScale*stretchXY,baseScale*stretchXY,baseScale*stretchZ);
+  renderCreature(section,breathing);
+  pop();
   renderLifeEffects(clockTime);
   const status=document.getElementById('slice-status');
   if(status)status.textContent=viewMode==='projection'?'完整骨架投影 · 24 節點 / 96 邊':
     'w = '+s.toFixed(1)+' / '+(section[0].faces.length?section[0].faces.length+' 面截體':'離開觀察空間');
   if(status)status.textContent+=' · '+({hunt:'追捕',rest:'休息',wander:'游走',hidden:'潛伏'}[ecosystem.hunter.mode])+
+    (h.somersaultTimer>0?' · 四維翻滾舒展':'')+
     ' · 小生物 '+ecosystem.prey.filter(p=>p.alive).length+'/6 · 捕捉 '+ecosystem.captures;
 }
 function windowResized(){const host=document.getElementById('canvas-host');resizeCanvas(host?host.clientWidth:windowWidth,host?host.clientHeight:windowHeight);resetView();}
