@@ -232,6 +232,39 @@ const FX={consumeDuration:4.5,birthDuration:1.25,restitution:.45,maxEffects:48,
   squishTime:.18,scatterTime:.75,absorbStrength:48,absorbRamp:.25,trailSamples:22,viscosity:3.4};
 const safeDirection=v=>{const n=Math.hypot(...v);return n>EPS?v.map(x=>x/n):[1,0,0];};
 const clamp01=x=>Math.max(0,Math.min(1,x));
+// 五次緩動曲線：每段起終點的速度與加速度都歸零。
+const easeInOut=t=>{t=clamp01(t);return t*t*t*(t*(t*6-15)+10);};
+function pulseAt(phase){
+  // 一整輪連續波形，經過原尺寸時仍在運動，不在每段接點停住。
+  const wave=-Math.sin(phase*Math.PI*2);
+  return {stretch:1+.12*wave,speed:1+.28*wave};
+}
+function flourishAt(timer){
+  const u=clamp01(1-timer/2.4),progress=easeInOut(u);
+  return {roll:progress*Math.PI*2,bloom:Math.sin(Math.PI*progress)**2};
+}
+// 臨界阻尼：保留姿態與變化速度，改變目標時不重新播放過渡。
+function settleMotion(state,key,target,dt,rate=4){
+  const velocityKey=key+'Velocity',velocity=state[velocityKey]||0;
+  const offset=state[key]-target,j=velocity+rate*offset,decay=Math.exp(-rate*dt);
+  state[key]=target+(offset+j*dt)*decay;
+  state[velocityKey]=(velocity-rate*j*dt)*decay;
+}
+function hunterPose(h){
+  const a=PARAMS.exploreAmount;
+  return {scale:1+(h.motion.scale-1)*a,tilt:h.motion.tilt*a,turn:h.motion.turn*a};
+}
+// 前半部骨架向四瓣漏斗舒展；後半部保留推進用的軀幹。
+function cagePoint(point,cage){
+  if(!cage||cage.open<=0)return point;
+  const axis=cage.axis,z=dot(point,axis),front=easeInOut((z+35)/140);
+  const radial=point.map((v,k)=>v-axis[k]*z),r=Math.hypot(...radial);
+  const tangent=safeDirection(cross(axis,Math.abs(axis[1])<.9?[0,1,0]:[1,0,0]));
+  const bitangent=cross(axis,tangent),angle=Math.atan2(dot(radial,bitangent),dot(radial,tangent));
+  const petal=.85+.15*Math.cos(angle*4),opening=cage.open*front;
+  const spread=1+opening*1.05*petal,depth=z-opening*(30+z*.22);
+  return point.map((_,k)=>axis[k]*depth+radial[k]*spread+(r<1?0:radial[k]/r*opening*24));
+}
 const fragmentHalf=(f,age)=>f.half?rotatePlane(rotatePlane(f.half,0,2,age*f.spin),1,2,age*f.spin*.7):null;
 function smallCreaturePoints(food,time,growth=1,position=food.position){
   return foodMeshes[food.kind].points.map(p=>{
@@ -242,6 +275,7 @@ function smallCreaturePoints(food,time,growth=1,position=food.position){
 }
 // 有限線段的最近點；包含平行、端點與零長度情況。
 function segmentContact(p1,q1,p2,q2){
+  if(globalThis.drifterCore)return globalThis.drifterCore.segmentContact(p1,q1,p2,q2);
   const d1=sub(q1,p1),d2=sub(q2,p2),r=sub(p1,p2);
   const a=dot(d1,d1),e=dot(d2,d2),f=dot(d2,r);let s=0,t=0;
   if(a<=EPS){t=e>EPS?clamp01(f/e):0;}
@@ -257,11 +291,19 @@ function segmentContact(p1,q1,p2,q2){
   const first=p1.map((v,k)=>v+d1[k]*s),second=p2.map((v,k)=>v+d2[k]*t);
   return {first,second,distance:Math.hypot(...sub(first,second))};
 }
-function hunterCollisionMeshes(meshes,breathing,pose,time){
+function hunterCollisionMeshes(meshes,breathing,pose,time,h=null){
+  const flourish=flourishAt(h?.somersaultTimer??0);
+  const stretch=h?1+(pulseAt(h.pulsePhase).stretch-1)*h.motion.drive*(1-.45*flourish.bloom):1;
+  const bloom=h?1+.12*flourish.bloom:1;
   return meshes.map(mesh=>({...mesh,points:mesh.points.map(p=>{
-    let q=p.slice(0,3).map(v=>v*breathing.scale*pose.scale);
-    q=rotatePlane(q,0,1,pose.tilt+.012*Math.sin(time*.19));
-    return rotatePlane(q,0,2,-pose.turn-.022*Math.sin(time*.27));
+    let q=p.slice(0,3);
+    // 伸展沿實際游動方向；靜止時沿用最後的方向，避免低速翻面。
+    if(h){const along=dot(q,h.motion.axis),side=1/Math.sqrt(stretch);
+      q=q.map((v,k)=>v*side+h.motion.axis[k]*along*(stretch-side));}
+    q=q.map(v=>v*breathing.scale*pose.scale*bloom);
+    q=rotatePlane(q,0,1,pose.tilt+.012*Math.sin(time*.19)+(h?flourish.roll:0));
+    q=rotatePlane(q,0,2,-pose.turn-.022*Math.sin(time*.27));
+    return h?cagePoint(q,h.cage):q;
   })}));
 }
 class Ecosystem {
@@ -274,7 +316,10 @@ class Ecosystem {
     this.hunter={position:[0,0,0],velocity:[0,0,0],energy:1,hunger:.8,
       mode:'wander',target:null,commit:0,cooldown:0,radius:32,mass:12,
       jiggle:0,jiggleNormal:[1,0,0],
-      pulseTime:0,somersaultTimer:0,somersaultCooldown:7+this.random()*6};
+      pulseTime:0,pulsePhase:0,pulseRate:1/2.4,hyperOffset:0,
+      motion:{scale:1,tilt:0,turn:0,drive:.65,axis:[1,0,0]},
+      cage:{phase:'idle',open:0,axis:[1,0,0],preyId:null,timer:0},
+      somersaultTimer:0,somersaultCooldown:7+this.random()*6};
     this.hunterMeshes=[project4DTo3D(sample4DBody(generate4DBody(),0))];
     this.hunterExtent=200;
   }
@@ -328,7 +373,7 @@ class Ecosystem {
     }
     return null;
   }
-  shatter(p,hit){
+  shatter(p,hit,internal=false){
     const h=this.hunter;
     // 以身體中心到接觸位置的方向定義外側，避免最近點法線指向骨架內部。
     const radial=sub(hit.first,h.position);
@@ -362,18 +407,20 @@ class Ecosystem {
     for(const [a,b] of foodMeshes[p.kind].edges)add(points[a].map((v,k)=>(v+points[b][k])/2),
       points[a].map((v,k)=>(points[b][k]-v)/2));
     // 用包住整個可見骨架的支撐平面阻擋碎片，避免從鏤空線框穿入。
-    const surface=this.fragmentSurface(normal),clearance=Math.max(0,...fragments.map(f=>
+    const surface=this.fragmentSurface(normal),clearance=internal?0:Math.max(0,...fragments.map(f=>
       surface+(f.half?Math.abs(dot(f.half,normal))+PARAMS.lineWidth/2:PARAMS.nodeRadius)-
       dot(sub(f.position,h.position),normal)));
     for(const f of fragments){
+      if(internal)f.velocity=f.velocity.map((v,k)=>h.velocity[k]+(v-h.velocity[k])*.08);
       f.position=f.position.map((v,k)=>v+normal[k]*clearance);
       f.history=[f.position.slice()];
     }
-    this.emit('consume',p.position,{fragments,trailClock:0,normal,separation:normal.map(v=>v*clearance),
+    this.emit('consume',p.position,{fragments,trailClock:0,normal,internal,separation:normal.map(v=>v*clearance),
       kind:p.kind,size:p.size,phase:p.phase,birth:p.birth});
-    this.emit('impact',hit.first);
-    h.jiggle=1;h.jiggleNormal=normal.slice();
-    h.somersaultTimer=2.4;h.somersaultCooldown=10+this.random()*6;
+    if(!internal)this.emit('impact',hit.first);
+    h.jiggle=internal?.15:1;h.jiggleNormal=normal.slice();
+    if(!internal&&h.somersaultTimer<=0)h.somersaultTimer=2.4;
+    h.somersaultCooldown=10+this.random()*6;
     p.alive=false;p.mode='captured';p.respawn=LIFE.respawnDelay;
     this.captures++;h.hunger=Math.max(0,h.hunger-.6);h.energy=clamp01(h.energy+.2);
     h.cooldown=3;h.target=null;h.mode='wander';
@@ -395,8 +442,9 @@ class Ecosystem {
     const sample=effect.trailClock>=1/60;if(sample)effect.trailClock%=1/60;
     for(const f of effect.fragments){
       if(f.absorbed){if(sample)f.history.shift();continue;}
-      const attraction=effect.age>FX.scatterTime;
-      const pull=clamp01((effect.age-FX.scatterTime)/FX.absorbRamp);
+      const scatterTime=effect.internal?.12:FX.scatterTime;
+      const attraction=effect.age>scatterTime;
+      const pull=clamp01((effect.age-scatterTime)/FX.absorbRamp);
       const drag=attraction?9.5:FX.viscosity;
       const toHunter=sub(this.hunter.position,f.position);
       const dist=Math.hypot(...toHunter);
@@ -420,17 +468,17 @@ class Ecosystem {
           -f.velocity[k]*drag+drift[k];
         f.velocity[k]+=acceleration*dt;f.position[k]+=f.velocity[k]*dt;
       }
-      if(!attraction)this.blockFragment(f,effect);
+      if(!attraction&&!effect.internal)this.blockFragment(f,effect);
       if(sample){f.history.push(f.position.slice());if(f.history.length>FX.trailSamples)f.history.shift();}
       if(attraction&&Math.hypot(...sub(f.position,this.hunter.position))<7)f.absorbed=true;
     }
   }
   resolveCollisions(visible){
-    if(visible)for(const p of this.prey)if(p.alive){const hit=this.preyContact(p);if(hit)this.shatter(p,hit);}
-    const live=this.prey.filter(p=>p.alive);
+    // 捕食改由開瓣包覆完成，擦過外側骨架不再直接吃掉。
+    const live=this.prey.filter(p=>p.alive&&p.mode!=='trapped');
     for(let pass=0;pass<3;pass++){
       for(let i=0;i<live.length;i++)for(let j=i+1;j<live.length;j++)this.collide(live[i],live[j]);
-      for(const a of [...live,this.hunter])for(let k=0;k<3;k++){
+      for(const a of [...this.prey.filter(p=>p.alive),this.hunter])for(let k=0;k<3;k++){
         if(Math.abs(a.position[k])>LIFE.bounds[k]){
           a.position[k]=Math.sign(a.position[k])*LIFE.bounds[k];
           if(a.velocity[k]*a.position[k]>0)a.velocity[k]*=-FX.restitution;
@@ -439,6 +487,44 @@ class Ecosystem {
     }
   }
   randomDirection(){return safeDirection([this.random()-.5,this.random()-.5,(this.random()-.5)*.7]);}
+  updateCage(dt,visible){
+    const h=this.hunter,c=h.cage,p=this.prey[c.preyId];
+    if(c.phase==='closing'){
+      if(!visible||!p?.alive){
+        if(p?.alive)p.mode='flee';
+        c.phase='recover';c.timer=.8;c.preyId=null;
+      }else{
+        c.timer+=dt;
+        // 把接住的位置連續拉向籠內，保留獵物的慣性及微小掙扎。
+        const depth=65-40*easeInOut(c.timer/.95);
+        const goal=h.position.map((v,k)=>v+c.axis[k]*depth+Math.sin(this.time*15+k*2)*3);
+        for(let k=0;k<3;k++){
+          p.velocity[k]+=(35*(goal[k]-p.position[k])-10*(p.velocity[k]-h.velocity[k]))*dt;
+          p.position[k]+=p.velocity[k]*dt;
+        }
+        if(c.timer>=1.05&&c.open<.18){
+          this.shatter(p,{first:p.position.slice()},true);
+          c.phase='recover';c.timer=1.3;c.preyId=null;
+        }
+      }
+    }else if(c.phase==='recover'){
+      c.timer-=dt;if(c.timer<=0)c.phase='idle';
+    }else{
+      const target=this.prey[h.target],offset=target?sub(target.position,h.position):null;
+      const distance=offset?Math.hypot(...offset):Infinity;
+      const ready=visible&&h.mode==='hunt'&&target?.alive&&distance<235;
+      c.phase=ready?'opening':'idle';
+      if(ready&&distance>1){
+        const desired=safeDirection(offset),follow=1-Math.exp(-3*dt);
+        c.axis=safeDirection(c.axis.map((v,k)=>v+(desired[k]-v)*follow));
+        const depth=dot(offset,c.axis),side=Math.sqrt(Math.max(0,distance*distance-depth*depth));
+        if(c.open>.7&&depth>10&&depth<110&&side+target.radius<80){
+          c.phase='closing';c.timer=0;c.preyId=target.id;target.mode='trapped';
+        }
+      }
+    }
+    settleMotion(c,'open',c.phase==='opening'?1:0,dt,c.phase==='closing'?5:3.5);
+  }
   move(agent,direction,speed,dt,response){
     const desired=safeDirection(direction).map(v=>v*speed);
     for(let k=0;k<3;k++){
@@ -447,8 +533,11 @@ class Ecosystem {
       desired[k]-=Math.sign(p)*Math.max(0,Math.abs(p)-limit*.78)*2.5;
     }
     const length=Math.hypot(...desired),factor=length>speed?speed/length:1;
+    // 意圖先轉彎，身體速度再跟上；保留慣性，避免換目標時加速度突變。
+    if(!agent.steering)agent.steering=agent.velocity.slice();
     for(let k=0;k<3;k++){
-      agent.velocity[k]+=(desired[k]*factor-agent.velocity[k])*(1-Math.exp(-response*dt));
+      agent.steering[k]+=(desired[k]*factor-agent.steering[k])*(1-Math.exp(-3*dt));
+      agent.velocity[k]+=(agent.steering[k]-agent.velocity[k])*(1-Math.exp(-response*dt));
       agent.position[k]+=agent.velocity[k]*dt;
       if(Math.abs(agent.position[k])>LIFE.bounds[k]){
         agent.position[k]=Math.sign(agent.position[k])*LIFE.bounds[k];agent.velocity[k]*=-.3;
@@ -475,12 +564,13 @@ class Ecosystem {
             return q.map(v=>v/extent*.94);
           });
           candidates.sort((a,b)=>Math.hypot(...sub(b,h.position))-Math.hypot(...sub(a,h.position)));
-          p.position=candidates[0];p.velocity=[0,0,0];p.energy=1;p.alive=true;p.mode='wander';p.intent=0;
+          p.position=candidates[0];p.velocity=[0,0,0];p.steering=[0,0,0];p.energy=1;p.alive=true;p.mode='wander';p.intent=0;
           p.birth=0;this.emit('birth',p.position,{preyId:p.id});
         }
         continue;
       }
       p.birth=Math.min(FX.birthDuration,p.birth+dt);
+      if(p.mode==='trapped')continue;
       const away=sub(p.position,h.position),distance=Math.hypot(...away);
       const fleeing=visible&&distance<LIFE.danger;
       p.energy=clamp01(p.energy+dt*(fleeing?-.09:.07));
@@ -505,22 +595,17 @@ class Ecosystem {
     // 水母脈衝推進與四維特技伸展計時
     h.pulseTime+=dt;
     h.somersaultCooldown-=dt;
-    if(h.somersaultCooldown<=0&&h.mode==='wander'){
+    if(h.somersaultCooldown<=0&&h.mode==='wander'&&h.cage.phase==='idle'&&h.somersaultTimer<=0){
       h.somersaultTimer=2.4;h.somersaultCooldown=10+this.random()*8;
     }
     if(h.somersaultTimer>0)h.somersaultTimer=Math.max(0,h.somersaultTimer-dt);
+    // 累積額外旋轉量，舒展收尾時只減速，不把四維時間倒回去。
+    h.hyperOffset+=dt*flourishAt(h.somersaultTimer).bloom*.85;
     const pulsePeriod=h.mode==='hunt'?1.4:h.mode==='rest'?3.6:2.4;
-    const pulsePhase=(h.pulseTime%pulsePeriod)/pulsePeriod;
-    let pulseSpeedMult=1;
-    if(pulsePhase<0.26){
-      pulseSpeedMult=0.45+0.55*(1-Math.sin(Math.PI*pulsePhase/0.26));
-    }else if(pulsePhase<0.52){
-      const u=(pulsePhase-0.26)/0.26;
-      pulseSpeedMult=0.45+(h.mode==='hunt'?0.76:0.95)*Math.sin(Math.PI*u);
-    }else{
-      const u=(pulsePhase-0.52)/0.48;
-      pulseSpeedMult=1.0+0.38*Math.exp(-3.5*u);
-    }
+    // 只逐漸改變頻率，切換行為不會把目前週期重新定位。
+    h.pulseRate+=(1/pulsePeriod-h.pulseRate)*(1-Math.exp(-2*dt));
+    h.pulsePhase=(h.pulsePhase+dt*h.pulseRate)%1;
+    const pulseSpeedMult=pulseAt(h.pulsePhase).speed;
     const resting=h.energy<.2||(h.mode==='rest'&&h.energy<.72);
     if(!visible||resting||h.cooldown>0||h.hunger<.35){
       h.mode=!visible?'hidden':resting?'rest':'wander';h.target=null;
@@ -539,8 +624,23 @@ class Ecosystem {
       const lead=Math.min(.65,Math.hypot(...sub(target.position,h.position))/150);
       direction=target.position.map((v,k)=>v+target.velocity[k]*lead-h.position[k]);
     }
-    const baseSpeed=h.mode==='hunt'?68+24*h.energy:h.mode==='rest'?6:18;
+    const baseSpeed=h.cage.phase==='closing'?12:h.cage.phase==='recover'?10:h.mode==='hunt'?68+24*h.energy:h.mode==='rest'?6:18;
     this.move(h,direction,baseSpeed*pulseSpeedMult,dt,2.0);
+    // 同一個身體由真實速度帶動，不再疊加 Explorer 的另一套表演。
+    const speed=Math.hypot(...h.velocity),activity=clamp01(speed/85);
+    const fullness=h.cage.phase==='recover'?.045*clamp01(h.cage.timer/1.3):0;
+    settleMotion(h.motion,'scale',.94+.12*activity+fullness,dt,2.8);
+    settleMotion(h.motion,'tilt',-h.velocity[0]*.0025,dt);
+    settleMotion(h.motion,'turn',h.velocity[2]*.003,dt);
+    settleMotion(h.motion,'drive',.35+.65*activity,dt,3);
+    if(speed>2){
+      const follow=1-Math.exp(-2*dt);
+      // 伸縮軸正反等價，選較近的一側，掉頭時不讓軸穿過零向量。
+      const sign=dot(h.motion.axis,h.velocity)<0?-1:1;
+      const axis=h.motion.axis.map((v,k)=>v+(sign*h.velocity[k]/speed-v)*follow);
+      if(Math.hypot(...axis)>.1)h.motion.axis=safeDirection(axis);
+    }
+    this.updateCage(dt,visible);
     this.resolveCollisions(visible);
   }
 }
@@ -676,52 +776,35 @@ function draw(){
   if(!paused){clockTime+=dt;explorer.update(dt);}
   const h=ecosystem.hunter;
   // 特技翻滾時，4D 旋轉速度暴增，胞體翻轉像伸展筋骨般開花
-  const somersaultU=h.somersaultTimer>0?(1-h.somersaultTimer/2.4):0;
-  const somersaultProgress=h.somersaultTimer>0?Math.sin(Math.PI*somersaultU):0;
-  const hyperTime=clockTime+somersaultProgress*1.8;
+  const hyperTime=clockTime+h.hyperOffset;
   const s=PARAMS.slicePosition+PARAMS.halfSize*1.48*Math.sin(hyperTime*PARAMS.sliceSpeed);
   // 預設整體骨架投影符合參考圖的密集交錯；切換後才計算 w=s。
-  section=viewMode==='projection'?[project4DTo3D(sample4DBody(body,hyperTime))]:
+  section=globalThis.drifterCore?
+    (viewMode==='projection'?[1]:PARAMS.shellLevels).map(level=>globalThis.drifterCore.geometry(PARAMS,hyperTime,level,s,viewMode)):
+    viewMode==='projection'?[project4DTo3D(sample4DBody(body,hyperTime))]:
     PARAMS.shellLevels.map(level=>sliceWith3DSpace(sample4DBody(body,hyperTime,level),s));
   // 整體極輕微地收縮、舒展，像緩慢呼吸；不改動母體幾何或切面計算。
   const breathing=breathingAt(clockTime);
-  const exploring=explorer.pose();
+  const exploring=hunterPose(h);
   ecosystem.update(dt,section.some(mesh=>mesh.edges.length>0),explorer.heading,
-    hunterCollisionMeshes(section,breathing,exploring,clockTime));
+    hunterCollisionMeshes(section,breathing,exploring,clockTime,h));
   renderFood(clockTime);
   const travelSize=Math.min(width,height);
   push();
-  // 水母脈衝 Squash & Stretch（噴射時沿移動方向伸長，蓄力時壓扁）
-  const pPeriod=h.mode==='hunt'?1.4:h.mode==='rest'?3.6:2.4;
-  const pPhase=(h.pulseTime%pPeriod)/pPeriod;
-  let stretchZ=1;
-  if(pPhase<0.26){
-    stretchZ=1-0.14*Math.sin(Math.PI*pPhase/0.26);
-  }else if(pPhase<0.52){
-    stretchZ=1+0.22*Math.sin(Math.PI*(pPhase-0.26)/0.26);
-  }else{
-    stretchZ=1+0.08*Math.exp(-3.5*(pPhase-0.52)/0.48);
-  }
-  const stretchXY=1/Math.sqrt(Math.max(0.4,stretchZ));
-  // 3D 特技立體桶滾（Barrel Roll）與開花舒展（Bloom）
-  const rollAngle=h.somersaultTimer>0?Math.sin(Math.PI*somersaultU)*Math.PI*2:0;
-  const bloomScale=h.somersaultTimer>0?(1+0.24*somersaultProgress):1;
   const jiggleOffset=h.jiggle>0?Math.sin(clockTime*48)*h.jiggle*3.2:0;
   const hPos=h.position.map((v,k)=>
     (v+(h.jiggleNormal?h.jiggleNormal[k]*jiggleOffset:0))*travelSize/560);
   translate(...hPos);
-  rotateY(exploring.turn+.022*Math.sin(clockTime*.27));
-  rotateZ(exploring.tilt+.012*Math.sin(clockTime*.19)+rollAngle);
   const jiggleScale=1+(h.jiggle>0?Math.sin(clockTime*36)*h.jiggle*0.035:0);
-  const baseScale=travelSize/560*breathing.scale*exploring.scale*jiggleScale*bloomScale;
-  scale(baseScale*stretchXY,baseScale*stretchXY,baseScale*stretchZ);
-  renderCreature(section,breathing);
+  scale(travelSize/560*jiggleScale);
+  renderCreature(hunterCollisionMeshes(section,breathing,hunterPose(h),clockTime,h),breathing);
   pop();
   renderLifeEffects(clockTime);
   const status=document.getElementById('slice-status');
   if(status)status.textContent=viewMode==='projection'?'完整骨架投影 · 24 節點 / 96 邊':
     'w = '+s.toFixed(1)+' / '+(section[0].faces.length?section[0].faces.length+' 面截體':'離開觀察空間');
   if(status)status.textContent+=' · '+({hunt:'追捕',rest:'休息',wander:'游走',hidden:'潛伏'}[ecosystem.hunter.mode])+
+    ({opening:' · 骨架開瓣',closing:' · 合籠捕食',recover:' · 消化回穩'}[h.cage.phase]||'')+
     (h.somersaultTimer>0?' · 四維翻滾舒展':'')+
     ' · 小生物 '+ecosystem.prey.filter(p=>p.alive).length+'/6 · 捕捉 '+ecosystem.captures;
 }

@@ -15,7 +15,8 @@ for(const item of foodItems.slice(0,4)){
   e.hunterMeshes=[{points:[touch,touch.map((v,k)=>v+(k===0?20:0))],edges:[[0,1]]}];
   const hit=e.preyContact(p);assert(hit,'visible node touches hunter wire');
   e.resolveCollisions(false);assert(p.alive,'hidden predator cannot shatter');
-  e.resolveCollisions(true);assert(!p.alive);assert.equal(e.captures,1);
+  e.resolveCollisions(true);assert(p.alive,'wire touch no longer bypasses cage');
+  e.shatter(p,hit);assert(!p.alive);assert.equal(e.captures,1);
   e.resolveCollisions(true);assert.equal(e.captures,1,'only one event per prey');
   const effect=e.effects.find(f=>f.type==='consume');
   assert.equal(effect.fragments.length,foodMeshes[p.kind].points.length+foodMeshes[p.kind].edges.length);
