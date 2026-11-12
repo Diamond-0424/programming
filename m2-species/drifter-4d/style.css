@@ -3,3 +3,4 @@
 :root{color-scheme:dark;color:#ededed;background:#000000}.tank{background:#000000;border-color:#292929}header{border-color:#292929}.heading p,.heading>span,.caption,footer{color:#999999}footer{border-color:#242424}button{border-color:#383838;color:#dddddd}button:hover{background:#1b1b1b}button:focus-visible{outline-color:#eeeeee}#slice-status{display:inline-block;margin-top:8px;font-variant-numeric:tabular-nums;color:#b3b3b3}
 
 footer div{flex-wrap:wrap}.mode-control{display:flex;align-items:center;gap:7px}select{font:inherit;color:#dddddd;background:#111111;border:1px solid #383838;padding:8px;cursor:pointer}select:focus-visible{outline:2px solid #eeeeee;outline-offset:3px}
+.entry-link{font-size:12px;line-height:1.8;color:#999}.entry-link a{color:#ddd;text-underline-offset:4px}.entry-link strong{color:#ddd;font-weight:500}

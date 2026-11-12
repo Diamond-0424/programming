@@ -39,7 +39,7 @@ function close(a,b,where='root'){
   console.log(`PASS: Rust/Wasm equivalence: ${meshes} meshes, ${cases.length} contacts, projection guard and output ownership.`);
   const originalCreate=vm.createContext;
   vm.createContext=function(sandbox={},...args){sandbox.drifterCore=core;return originalCreate.call(this,sandbox,...args);};
-  for(const name of ['geometry','behavior','ecosystem','interaction','physics-effects','shatter','cage'])require('./'+name+'.cjs');
+  for(const name of ['geometry','behavior','ecosystem','interaction','physics-effects','shatter','cage','population'])require('./'+name+'.cjs');
   vm.createContext=originalCreate;
   // 真正的瀏覽器載入流程：成功、HTTP 失敗都驗證，避免測到的只是手動注入。
   const bridge=fs.readFileSync(path.join(__dirname,'../rust-core/bridge.js'),'utf8');

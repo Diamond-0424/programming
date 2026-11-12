@@ -5,7 +5,8 @@ const root=fs.realpathSync(__dirname);
 const server=http.createServer((req,res)=>{
   try{
     const url=new URL(req.url,'http://localhost');
-    const name=decodeURIComponent(url.pathname)==='/'?'index.html':decodeURIComponent(url.pathname).slice(1);
+    if(url.pathname==='/'){res.writeHead(302,{Location:'/three.html'}).end();return;}
+    const name=decodeURIComponent(url.pathname).slice(1);
     const target=path.resolve(root,name),relative=path.relative(root,target);
     if(relative.startsWith('..')||path.isAbsolute(relative)||name.split(/[\\/]/).some(p=>p.startsWith('.'))){res.writeHead(403).end();return;}
     const type=types[path.extname(target)];if(!type){res.writeHead(404).end();return;}

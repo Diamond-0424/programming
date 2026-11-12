@@ -4,7 +4,7 @@ const ids=['canvas-host','loading','pause','reset','capture','view-mode','view-l
 const dom=Object.fromEntries(ids.map(id=>[id,{clientWidth:960,clientHeight:640,value:'projection',textContent:'',setAttribute(){},remove(){}}]));
 const c={Math,document:{getElementById:id=>dom[id]||null},window:{devicePixelRatio:1},windowWidth:960,windowHeight:640,deltaTime:16,
   WEBGL:1,LINES:2,POINTS:3,TRIANGLES:4,ADD:5,BLEND:6,CLOSE:7};
-for(const key of ['pixelDensity','describe','background','orbitControl','push','pop','scale','translate','rotateY','rotateZ','blendMode','noFill','stroke','strokeWeight','beginShape','endShape','vertex','fill','saveCanvas'])c[key]=()=>{};
+for(const key of ['pixelDensity','describe','background','orbitControl','push','pop','scale','translate','rotateY','rotateZ','blendMode','noFill','noStroke','stroke','strokeWeight','beginShape','endShape','vertex','fill','saveCanvas'])c[key]=()=>{};
 c.createCanvas=(w,h)=>{c.width=w;c.height=h;return {parent(){},elt:{addEventListener(){}}};};
 c.createCamera=()=>({camera(x,y,z,cx,cy,cz,ux,uy,uz){Object.assign(this,{eyeX:x,eyeY:y,eyeZ:z,centerX:cx,centerY:cy,centerZ:cz,upX:ux,upY:uy,upZ:uz});},perspective(){}});
 vm.createContext(c);vm.runInContext(fs.readFileSync(path.join(__dirname,'../sketch.js'),'utf8')+';globalThis.state=()=>({clockTime,paused,viewMode,section});',c);
