@@ -1,5 +1,6 @@
 //! 截游體的純數值核心。輸出暫存在同一個緩衝區，JS 必須在下次呼叫前複製。
 use std::cell::RefCell;
+mod physics;
 const EPS: f64 = 1e-7;
 thread_local! { static OUTPUT: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) }; }
 fn output(values: Vec<f64>) { OUTPUT.with(|o| *o.borrow_mut() = values); }
